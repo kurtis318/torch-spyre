@@ -111,6 +111,8 @@ jobs:
             config: torch_spyre_tests/test_device_enum_config.yaml
           - name: Test Fallbacks
             config: torch_spyre_tests/test_fallbacks_config.yaml
+          - name: Test logging patterns
+            config: torch_spyre_tests/test_logging_patterns.yaml
           - name: Test Modules
             config: torch_spyre_tests/test_modules_config.yaml
           - name: Test Regex
