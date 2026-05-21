@@ -19,8 +19,16 @@ import importlib
 
 from .constants import DEVICE_NAME, DISTRIBUTED_BACKEND_NAME
 
+from torch_spyre._compat import logging as compat_logging
 from . import memory
 from . import profiler
+
+# Bob says this is not needed
+# Check for legacy configuration on import
+# if compat_logging.check_legacy_env_vars():
+#     # Legacy variables will be handled by logging_config.py
+#     # This just ensures the warning is shown
+#     pass
 
 _runtime_init_lock = threading.Lock()
 
