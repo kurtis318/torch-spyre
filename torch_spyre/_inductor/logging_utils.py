@@ -25,7 +25,7 @@ import os
 from torch_spyre import logging_config
 
 # Cache for logger instances
-_loggers = {}
+_loggers:  dict[str, logging.Logger] = {}
 
 
 def get_logger(name: str) -> logging.Logger:
