@@ -54,7 +54,12 @@ def _candidate_package_roots() -> Generator[Path, None, None]:
     yield script_dir / "torch-spyre" / "torch-spyre" / "torch_spyre"
 
     seen = set()
-    anchors = [script_dir, *script_dir.parents, Path.cwd().resolve(), *Path.cwd().resolve().parents]
+    anchors = [
+        script_dir,
+        *script_dir.parents,
+        Path.cwd().resolve(),
+        *Path.cwd().resolve().parents,
+    ]
     for anchor in anchors:
         if anchor in seen:
             continue
@@ -66,10 +71,9 @@ def _candidate_package_roots() -> Generator[Path, None, None]:
 
 
 def _is_package_root(candidate: Path) -> bool:
-    return (
-        (candidate / "logging_config.py").is_file()
-        and (candidate / "_compat" / "logging.py").is_file()
-    )
+    return (candidate / "logging_config.py").is_file() and (
+        candidate / "_compat" / "logging.py"
+    ).is_file()
 
 
 def _find_package_root() -> Path | None:
@@ -213,7 +217,11 @@ class LoggingIsolationMixin:
                 "Set TORCH_SPYRE_PACKAGE_ROOT to the directory containing "
                 "logging_config.py if this checkout stores sources elsewhere."
             )
-        if not (PACKAGE_ROOT / "logging_config.py").is_file():
+
+        if PACKAGE_ROOT is None:
+            pytest.skip(f"Invalid torch_spyre package root: {PACKAGE_ROOT}")
+        file_path = Path(str(PACKAGE_ROOT) + "/logging_config.py")
+        if not file_path.is_file():
             pytest.skip(f"Invalid torch_spyre package root: {PACKAGE_ROOT}")
 
         # Temporarily save and clear TORCH_LOGS to prevent PyTorch from parsing
@@ -337,7 +345,9 @@ class UnifiedLoggingPatternTests(LoggingIsolationMixin, unittest.TestCase):
             "programmatic",
         )
 
-        with self.assertLogs("spyre.inductor.test_component", level="DEBUG") as captured:
+        with self.assertLogs(
+            "spyre.inductor.test_component", level="DEBUG"
+        ) as captured:
             refreshed_logger.debug("This DEBUG message should now be visible")
             refreshed_logger.info("This INFO message should be visible")
             refreshed_logger.warning("This WARNING message should be visible")
@@ -356,7 +366,9 @@ class LegacyCompatibilityTests(LoggingIsolationMixin, unittest.TestCase):
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            logging_config, compat_logging, logging_utils = self._reload_logging_modules()
+            logging_config, compat_logging, logging_utils = (
+                self._reload_logging_modules()
+            )
 
         messages = [str(w.message) for w in caught]
         self.assertTrue(compat_logging.check_legacy_env_vars())
@@ -377,7 +389,10 @@ class LegacyCompatibilityTests(LoggingIsolationMixin, unittest.TestCase):
             "legacy:TORCH_SPYRE_DEBUG",
         )
         self.assertTrue(
-            any("Legacy logging environment variables detected" in message for message in messages)
+            any(
+                "Legacy logging environment variables detected" in message
+                for message in messages
+            )
         )
         self.assertTrue(
             any("SPYRE_INDUCTOR_LOG is deprecated" in message for message in messages)
@@ -388,7 +403,9 @@ class LegacyCompatibilityTests(LoggingIsolationMixin, unittest.TestCase):
 
         legacy_logger = logging_utils.get_logger("legacy_test")
         with self.assertLogs("spyre.inductor.legacy_test", level="DEBUG") as captured:
-            legacy_logger.debug("DEBUG message (enabled via SPYRE_INDUCTOR_LOG_LEVEL=DEBUG)")
+            legacy_logger.debug(
+                "DEBUG message (enabled via SPYRE_INDUCTOR_LOG_LEVEL=DEBUG)"
+            )
             legacy_logger.info("INFO message")
             legacy_logger.warning("WARNING message")
 
@@ -421,7 +438,9 @@ class CompleteIntegrationTests(LoggingIsolationMixin, unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_path = os.path.join(tmpdir, "spyre.log")
-            logging_config, compat_logging, logging_utils = self._reload_logging_modules()
+            logging_config, compat_logging, logging_utils = (
+                self._reload_logging_modules()
+            )
 
             self.assertFalse(compat_logging.check_legacy_env_vars())
             components = logging_config.list_components()

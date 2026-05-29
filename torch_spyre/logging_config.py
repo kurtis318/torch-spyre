@@ -240,8 +240,7 @@ def configure_python_logging():
 
         if desired_file:
             file_handler_present = any(
-                getattr(handler, "baseFilename", None)
-                == os.path.abspath(desired_file)
+                getattr(handler, "baseFilename", None) == os.path.abspath(desired_file)
                 for handler in existing_file_handlers
             )
             if not file_handler_present:
