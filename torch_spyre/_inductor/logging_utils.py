@@ -76,6 +76,27 @@ def _get_env_bool(var: str, default: bool) -> bool:
     return os.getenv(var, str(int(default))).lower() in ("1", "true", "yes")
 
 
+# Module-level cache for inductor logging enabled state
+_INDUCTOR_LOGGING_ENABLED: bool | None = None
+
+
+def is_inductor_logging_enabled() -> bool:
+    """Check if inductor logging is enabled via environment variable.
+
+    This is a backward-compatible function that checks the SPYRE_INDUCTOR_LOG
+    environment variable. Returns True if logging is enabled, False otherwise.
+
+    Returns:
+        True if SPYRE_INDUCTOR_LOG is set to a truthy value, False otherwise
+    """
+    global _INDUCTOR_LOGGING_ENABLED
+
+    if _INDUCTOR_LOGGING_ENABLED is None:
+        _INDUCTOR_LOGGING_ENABLED = _get_env_bool("SPYRE_INDUCTOR_LOG", False)
+
+    return _INDUCTOR_LOGGING_ENABLED
+
+
 # Convenience loggers for common components
 lowering_log = get_logger("lowering")
 codegen_log = get_logger("codegen")
