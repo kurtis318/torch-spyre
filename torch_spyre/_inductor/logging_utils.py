@@ -51,10 +51,12 @@ def get_logger(name: str) -> logging.Logger:
         logging_config._config.clear()
         logging_config._config_source.clear()
 
-    if full_name in _loggers:
-        return _loggers[full_name]
-
     logging_config.configure_python_logging()
+
+    if full_name in _loggers:
+        logger = _loggers[full_name]
+        logger.setLevel(int(logging_config.get_log_level(full_name)))
+        return logger
 
     logger = logging.getLogger(full_name)
     logger.setLevel(int(logging_config.get_log_level(full_name)))
