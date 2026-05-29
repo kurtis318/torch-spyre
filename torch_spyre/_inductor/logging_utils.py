@@ -43,11 +43,13 @@ def get_logger(name: str) -> logging.Logger:
     # If _INDUCTOR_LOGGING_ENABLED was reset (e.g., in tests), force re-initialization
     # of logging config to pick up new environment variables
     global _INDUCTOR_LOGGING_ENABLED
-    if _INDUCTOR_LOGGING_ENABLED is None and full_name in _loggers:
+    if _INDUCTOR_LOGGING_ENABLED is None:
         # Clear cached loggers to force reconfiguration
         _loggers.clear()
-        # Force logging_config to re-initialize
+        # Force logging_config to re-initialize by clearing its state
         logging_config._initialized = False
+        logging_config._config.clear()
+        logging_config._config_source.clear()
 
     if full_name in _loggers:
         return _loggers[full_name]
