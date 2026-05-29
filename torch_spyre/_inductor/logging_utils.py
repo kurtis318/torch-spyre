@@ -40,6 +40,15 @@ def get_logger(name: str) -> logging.Logger:
     """
     full_name = f"spyre.inductor.{name}"
 
+    # If _INDUCTOR_LOGGING_ENABLED was reset (e.g., in tests), force re-initialization
+    # of logging config to pick up new environment variables
+    global _INDUCTOR_LOGGING_ENABLED
+    if _INDUCTOR_LOGGING_ENABLED is None and full_name in _loggers:
+        # Clear cached loggers to force reconfiguration
+        _loggers.clear()
+        # Force logging_config to re-initialize
+        logging_config._initialized = False
+
     if full_name in _loggers:
         return _loggers[full_name]
 
