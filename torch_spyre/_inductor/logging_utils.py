@@ -50,6 +50,8 @@ def get_logger(name: str) -> logging.Logger:
         logging_config._initialized = False
         logging_config._config.clear()
         logging_config._config_source.clear()
+        # Reinitialize with current environment
+        logging_config.initialize()
 
     logging_config.configure_python_logging()
 

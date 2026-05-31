@@ -71,9 +71,15 @@ def _candidate_package_roots() -> Generator[Path, None, None]:
 
 
 def _is_package_root(candidate: Path) -> bool:
-    return (candidate / "logging_config.py").is_file() and (
-        candidate / "_compat" / "logging.py"
-    ).is_file()
+    # Check if this is the torch_spyre package directory
+    # It should contain logging_config.py and _compat/logging.py
+    has_logging_config = (candidate / "logging_config.py").is_file()
+    has_compat_logging = (candidate / "_compat" / "logging.py").is_file()
+
+    # Also check if this looks like the torch_spyre package by checking for __init__.py
+    has_init = (candidate / "__init__.py").is_file()
+
+    return has_logging_config and has_compat_logging and has_init
 
 
 def _find_package_root() -> Path | None:
