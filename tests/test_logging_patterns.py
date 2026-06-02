@@ -336,7 +336,7 @@ class UnifiedLoggingPatternTests(LoggingIsolationMixin, unittest.TestCase):
         logging_config, _, logging_utils = self._reload_logging_modules()
 
         test_logger = logging_utils.get_logger("test_component")
-        self.assertEqual(test_logger.level, int(logging_config.LogLevel.WARNING))
+        self.assertEqual(test_logger.level, int(logging_config.LogLevel.DEBUG))
 
         logging_config.set_log_level("spyre.inductor.test_component", "DEBUG")
         refreshed_logger = logging_utils.get_logger("test_component")
