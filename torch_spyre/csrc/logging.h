@@ -19,6 +19,14 @@
 #include <iostream>
 #include <utility>
 
+#include "logging_config.h"
+#include "logging_legacy.h"
+
+// Re-export new logging interface
+using torch_spyre::logging::Logger;
+using torch_spyre::logging::LoggingConfig;
+using torch_spyre::logging::LogLevel;
+
 namespace spyre {
 
 extern bool g_debug_info_enabled;
@@ -52,19 +60,5 @@ class SuppressDebugLog {
     spyre::g_debug_info_enabled = original_state;
   }
 };
-
-#define DEBUGINFO(...)                                                   \
-  do {                                                                   \
-    if (spyre::g_debug_info_enabled) {                                   \
-      ::spyre::detail::PrintLog(true, "[", __func__, "] ", __VA_ARGS__); \
-    }                                                                    \
-  } while (0);
-
-#define DEBUGINFO_NO_ENDL(...)                                            \
-  do {                                                                    \
-    if (spyre::g_debug_info_enabled) {                                    \
-      ::spyre::detail::PrintLog(false, "[", __func__, "] ", __VA_ARGS__); \
-    }                                                                     \
-  } while (0);
 
 }  // namespace spyre

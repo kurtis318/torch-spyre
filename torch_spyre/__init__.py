@@ -18,9 +18,9 @@ import types
 import importlib
 
 from .constants import DEVICE_NAME, DISTRIBUTED_BACKEND_NAME
-
 from . import memory
 from . import profiler
+
 
 _runtime_init_lock = threading.Lock()
 

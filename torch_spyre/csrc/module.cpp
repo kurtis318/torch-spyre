@@ -40,6 +40,7 @@
 #endif
 
 #include "logging.h"
+#include "logging_config.h"
 #include "prepare_kernel.h"
 #include "spyre_allocator.h"
 #include "spyre_device_enum.h"
@@ -166,6 +167,9 @@ PYBIND11_MODULE(_C, m) {
   m.def("free_runtime", &spyre::freeRuntime);
   m.def("launch_kernel", &spyre::launchKernel);
   m.def("encode_constant", &spyre::encodeConstant);
+
+  // Initialize logging bindings
+  torch_spyre::logging::init_logging_bindings(m);
 
   py::class_<spyre::SpyreTensorLayout> dci_cls(m, "SpyreTensorLayout");
 
