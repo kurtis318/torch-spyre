@@ -71,15 +71,10 @@ def _candidate_package_roots() -> Generator[Path, None, None]:
 
 
 def _is_package_root(candidate: Path) -> bool:
-    # Check if this is the torch_spyre package directory
-    # It should contain logging_config.py and _compat/logging.py
     has_logging_config = (candidate / "logging_config.py").is_file()
-    has_compat_logging = (candidate / "_compat" / "logging.py").is_file()
-
-    # Also check if this looks like the torch_spyre package by checking for __init__.py
     has_init = (candidate / "__init__.py").is_file()
 
-    return has_logging_config and has_compat_logging and has_init
+    return has_logging_config and has_init
 
 
 def _find_package_root() -> Path | None:
@@ -127,7 +122,6 @@ class LoggingIsolationMixin:
             name: sys.modules.get(name)
             for name in (
                 "torch_spyre.logging_config",
-                "torch_spyre._compat.logging",
                 "torch_spyre._inductor.logging_utils",
             )
         }
@@ -164,11 +158,21 @@ class LoggingIsolationMixin:
 
         for module_name in (
             "torch_spyre.logging_config",
-            "torch_spyre._compat.logging",
             "torch_spyre._inductor.logging_utils",
         ):
             if module_name in sys.modules:
                 del sys.modules[module_name]
+
+        # Also clean up submodule attributes on the torch_spyre package,
+        # which persist even after sys.modules entries are deleted.
+        ts_mod = sys.modules.get("torch_spyre")
+        if ts_mod:
+            for attr in ("logging_config", "_inductor"):
+                if hasattr(ts_mod, attr):
+                    try:
+                        delattr(ts_mod, attr)
+                    except AttributeError:
+                        pass
 
         for name, module in self._saved_modules.items():
             if module is not None:
@@ -215,7 +219,7 @@ class LoggingIsolationMixin:
 
     def _reload_logging_modules(
         self,
-    ) -> tuple[ModuleType, ModuleType, ModuleType]:
+    ) -> tuple[ModuleType, ModuleType]:
         """Reload the logging modules under the current environment settings."""
         if PACKAGE_ROOT is None:
             pytest.skip(
@@ -224,34 +228,21 @@ class LoggingIsolationMixin:
                 "logging_config.py if this checkout stores sources elsewhere."
             )
 
-        if PACKAGE_ROOT is None:
-            pytest.skip(f"Invalid torch_spyre package root: {PACKAGE_ROOT}")
         file_path = Path(str(PACKAGE_ROOT) + "/logging_config.py")
         if not file_path.is_file():
             pytest.skip(f"Invalid torch_spyre package root: {PACKAGE_ROOT}")
 
-        # Temporarily save and clear TORCH_LOGS to prevent PyTorch from parsing
-        # spyre-specific log settings during torch import
+        # Load logging_config first — it does NOT import torch, so TORCH_LOGS
+        # can safely remain in the environment for _parse_torch_logs() to read
+        # during initialize() (called at module load time).
+        logging_config = self._load_module("logging_config", "logging_config.py")
+
+        # NOW save and clear TORCH_LOGS before loading modules that import
+        # torch, since PyTorch's logging system rejects unregistered spyre.*
+        # namespaces.
         saved_torch_logs = os.environ.get("TORCH_LOGS")
         if saved_torch_logs and "spyre" in saved_torch_logs:
             os.environ.pop("TORCH_LOGS", None)
-
-        # Load logging_config first (doesn't import torch)
-        logging_config = self._load_module("logging_config", "logging_config.py")
-
-        # Restore TORCH_LOGS before logging_config initializes
-        # This allows logging_config to read it, but torch has already been imported
-        if saved_torch_logs:
-            os.environ["TORCH_LOGS"] = saved_torch_logs
-
-        compat_package_name = "_compat"
-        compat_package = sys.modules.get(compat_package_name)
-        if compat_package is None:
-            assert PACKAGE_ROOT is not None
-            compat_package = self._ensure_package_module(
-                compat_package_name,
-                PACKAGE_ROOT / "_compat",
-            )
 
         inductor_package_name = "_inductor"
         inductor_package = sys.modules.get(inductor_package_name)
@@ -262,26 +253,35 @@ class LoggingIsolationMixin:
                 PACKAGE_ROOT / "_inductor",
             )
 
-        compat_logging = self._load_module("_compat.logging", "_compat/logging.py")
+        # Clean up stale torch_spyre.logging_config references that persist
+        # as attributes on the torch_spyre package from prior test runs.
+        if "torch_spyre.logging_config" in sys.modules:
+            del sys.modules["torch_spyre.logging_config"]
+        ts_mod = sys.modules.get("torch_spyre")
+        if ts_mod and hasattr(ts_mod, "logging_config"):
+            delattr(ts_mod, "logging_config")
 
         # logging_utils imports torch_spyre which triggers torch import
-        # But TORCH_LOGS is already restored, so logging_config can read it
         logging_utils = self._load_module(
             "_inductor.logging_utils",
             "_inductor/logging_utils.py",
         )
 
-        return logging_config, compat_logging, logging_utils
+        # Restore TORCH_LOGS after torch has been imported
+        if saved_torch_logs:
+            os.environ["TORCH_LOGS"] = saved_torch_logs
+
+        return logging_config, logging_utils
 
 
 class UnifiedLoggingPatternTests(LoggingIsolationMixin, unittest.TestCase):
     """Tests for the unified logging configuration flow."""
 
     # Need to figure out why this one fails.
-    def xtest_unified_torch_logs_controls_new_patterns(self) -> None:
+    def test_unified_torch_logs_controls_new_patterns(self) -> None:
         """Verify TORCH_LOGS enables the new unified warning patterns."""
         os.environ["TORCH_LOGS"] = "spyre.inductor:DEBUG"
-        logging_config, _, logging_utils = self._reload_logging_modules()
+        logging_config, logging_utils = self._reload_logging_modules()
 
         compile_logger = logging_utils.get_logger("sdsc_compile")
         wd_logger = logging_utils.get_logger("work_division")
@@ -333,7 +333,7 @@ class UnifiedLoggingPatternTests(LoggingIsolationMixin, unittest.TestCase):
 
     def test_programmatic_override_enables_component_specific_messages(self) -> None:
         """Verify programmatic overrides affect a specific component logger."""
-        logging_config, _, logging_utils = self._reload_logging_modules()
+        logging_config, logging_utils = self._reload_logging_modules()
 
         test_logger = logging_utils.get_logger("test_component")
         self.assertEqual(test_logger.level, int(logging_config.LogLevel.DEBUG))
@@ -366,18 +366,16 @@ class LegacyCompatibilityTests(LoggingIsolationMixin, unittest.TestCase):
 
     def test_legacy_environment_variables_map_to_unified_config(self) -> None:
         """Verify legacy env vars map into unified config with warnings."""
+        os.environ.pop("TORCH_LOGS", None)
         os.environ["SPYRE_INDUCTOR_LOG"] = "1"
         os.environ["SPYRE_INDUCTOR_LOG_LEVEL"] = "DEBUG"
         os.environ["TORCH_SPYRE_DEBUG"] = "1"
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            logging_config, compat_logging, logging_utils = (
-                self._reload_logging_modules()
-            )
+            logging_config, logging_utils = self._reload_logging_modules()
 
         messages = [str(w.message) for w in caught]
-        self.assertTrue(compat_logging.check_legacy_env_vars())
         self.assertEqual(
             logging_config.get_effective_config()["spyre.inductor"],
             "DEBUG",
@@ -393,12 +391,6 @@ class LegacyCompatibilityTests(LoggingIsolationMixin, unittest.TestCase):
         self.assertEqual(
             logging_config.get_config_source("spyre.runtime"),
             "legacy:TORCH_SPYRE_DEBUG",
-        )
-        self.assertTrue(
-            any(
-                "Legacy logging environment variables detected" in message
-                for message in messages
-            )
         )
         self.assertTrue(
             any("SPYRE_INDUCTOR_LOG is deprecated" in message for message in messages)
@@ -417,16 +409,17 @@ class LegacyCompatibilityTests(LoggingIsolationMixin, unittest.TestCase):
 
         self.assertEqual(len(captured.output), 3)
 
-    def test_legacy_log_file_accessor_warns_and_returns_path(self) -> None:
-        """Verify the legacy log-file accessor warns and returns its value."""
+    def test_legacy_log_file_env_var_maps_to_unified_config(self) -> None:
+        """Verify SPYRE_LOG_FILE maps into unified output config with warning."""
         os.environ["SPYRE_LOG_FILE"] = "/tmp/spyre-legacy.log"
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            _, compat_logging, _ = self._reload_logging_modules()
-            legacy_path = compat_logging.get_legacy_log_file()
+            logging_config, _ = self._reload_logging_modules()
 
-        self.assertEqual(legacy_path, "/tmp/spyre-legacy.log")
+        output_config = logging_config.get_output_config()
+        self.assertEqual(output_config["log_file"], "/tmp/spyre-legacy.log")
+        self.assertEqual(output_config["log_file_source"], "legacy:SPYRE_LOG_FILE")
         messages = [str(w.message) for w in caught]
         self.assertTrue(
             any("SPYRE_LOG_FILE is deprecated" in message for message in messages)
@@ -444,11 +437,11 @@ class CompleteIntegrationTests(LoggingIsolationMixin, unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_path = os.path.join(tmpdir, "spyre.log")
-            logging_config, compat_logging, logging_utils = (
-                self._reload_logging_modules()
-            )
+            logging_config, logging_utils = self._reload_logging_modules()
 
-            self.assertFalse(compat_logging.check_legacy_env_vars())
+            self.assertNotIn(
+                "legacy:", logging_config.get_config_source("spyre.inductor")
+            )
             components = logging_config.list_components()
             self.assertIn("spyre.inductor", components)
             self.assertIn("spyre.execution", components)

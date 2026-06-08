@@ -50,11 +50,11 @@ def get_logger(name: str) -> logging.Logger:
         logging_config._initialized = False
         logging_config._config.clear()
         logging_config._config_source.clear()
+        logging_config._python_logging_configured = False
         # Reinitialize with current environment
         logging_config.initialize()
+        logging_config.configure_python_logging()
         _INDUCTOR_LOGGING_ENABLED = _get_env_bool("SPYRE_INDUCTOR_LOG", False)
-
-    logging_config.configure_python_logging()
 
     if full_name in _loggers:
         logger = _loggers[full_name]
@@ -114,7 +114,9 @@ def is_inductor_logging_enabled() -> bool:
         logging_config._initialized = False
         logging_config._config.clear()
         logging_config._config_source.clear()
+        logging_config._python_logging_configured = False
         logging_config.initialize()
+        logging_config.configure_python_logging()
     return _INDUCTOR_LOGGING_ENABLED
 
 
