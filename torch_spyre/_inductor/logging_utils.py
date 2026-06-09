@@ -27,6 +27,27 @@ from torch_spyre import logging_config
 # Cache for logger instances
 _loggers: dict[str, logging.Logger] = {}
 
+# Flag set by tests to trigger re-initialization on next get_logger() call
+_needs_reinit: bool = False
+
+
+def _reinitialize():
+    """Force re-initialization of logging config from current environment.
+
+    Called when _needs_reinit is True (set by tests to pick up changed
+    environment variables between test cases).
+    """
+    global _INDUCTOR_LOGGING_ENABLED, _needs_reinit
+    _loggers.clear()
+    logging_config._initialized = False
+    logging_config._config.clear()
+    logging_config._config_source.clear()
+    logging_config._python_logging_configured = False
+    logging_config.initialize()
+    logging_config.configure_python_logging()
+    _INDUCTOR_LOGGING_ENABLED = _get_env_bool("SPYRE_INDUCTOR_LOG", False)
+    _needs_reinit = False
+
 
 def get_logger(name: str) -> logging.Logger:
     """Get or create a logger for the given name.
@@ -40,21 +61,8 @@ def get_logger(name: str) -> logging.Logger:
     """
     full_name = f"spyre.inductor.{name}"
 
-    # If _INDUCTOR_LOGGING_ENABLED was reset (e.g., in tests), force re-initialization
-    # of logging config to pick up new environment variables
-    global _INDUCTOR_LOGGING_ENABLED
-    if _INDUCTOR_LOGGING_ENABLED is None:
-        # Clear cached loggers to force reconfiguration
-        _loggers.clear()
-        # Force logging_config to re-initialize by clearing its state
-        logging_config._initialized = False
-        logging_config._config.clear()
-        logging_config._config_source.clear()
-        logging_config._python_logging_configured = False
-        # Reinitialize with current environment
-        logging_config.initialize()
-        logging_config.configure_python_logging()
-        _INDUCTOR_LOGGING_ENABLED = _get_env_bool("SPYRE_INDUCTOR_LOG", False)
+    if _needs_reinit:
+        _reinitialize()
 
     if full_name in _loggers:
         logger = _loggers[full_name]
@@ -93,7 +101,7 @@ def _get_env_bool(var: str, default: bool) -> bool:
 
 
 # Module-level cache for inductor logging enabled state
-_INDUCTOR_LOGGING_ENABLED: bool | None = None
+_INDUCTOR_LOGGING_ENABLED: bool = _get_env_bool("SPYRE_INDUCTOR_LOG", False)
 
 
 def is_inductor_logging_enabled() -> bool:
@@ -105,18 +113,8 @@ def is_inductor_logging_enabled() -> bool:
     Returns:
         True if SPYRE_INDUCTOR_LOG is set to a truthy value, False otherwise
     """
-    global _INDUCTOR_LOGGING_ENABLED
-
-    if _INDUCTOR_LOGGING_ENABLED is None:
-        _INDUCTOR_LOGGING_ENABLED = _get_env_bool("SPYRE_INDUCTOR_LOG", False)
-        # Re-initialize logging config to pick up current environment
-        _loggers.clear()
-        logging_config._initialized = False
-        logging_config._config.clear()
-        logging_config._config_source.clear()
-        logging_config._python_logging_configured = False
-        logging_config.initialize()
-        logging_config.configure_python_logging()
+    if _needs_reinit:
+        _reinitialize()
     return _INDUCTOR_LOGGING_ENABLED
 
 

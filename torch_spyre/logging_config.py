@@ -156,12 +156,14 @@ def _parse_legacy_vars() -> Dict[str, LogLevel]:
 
     if os.environ.get("TORCH_SPYRE_DEBUG") == "1":
         warnings.warn(
-            "TORCH_SPYRE_DEBUG is deprecated. Use TORCH_LOGS='spyre.runtime:DEBUG' instead.",
+            "TORCH_SPYRE_DEBUG is deprecated. Use TORCH_LOGS='spyre:DEBUG' instead.",
             DeprecationWarning,
             stacklevel=3,
         )
-        config["spyre.runtime"] = LogLevel.DEBUG
-        _config_source["spyre.runtime"] = "legacy:TORCH_SPYRE_DEBUG"
+        for component in DEFAULT_LOG_LEVELS:
+            if component not in config:
+                config[component] = LogLevel.DEBUG
+                _config_source[component] = "legacy:TORCH_SPYRE_DEBUG"
 
     legacy_log_file = os.environ.get("SPYRE_LOG_FILE")
     if legacy_log_file:
@@ -358,7 +360,7 @@ def get_log_file() -> Optional[str]:
 
 def set_log_file(path: Optional[str]):
     """Set the log file path programmatically."""
-    global _log_file_path, _log_file_source
+    global _log_file_path, _log_file_source, _python_logging_configured
 
     if not _initialized:
         initialize()
@@ -366,6 +368,7 @@ def set_log_file(path: Optional[str]):
     with _get_lock():
         _log_file_path = path
         _log_file_source = "programmatic" if path else "default"
+        _python_logging_configured = False
         configure_python_logging()
 
 
