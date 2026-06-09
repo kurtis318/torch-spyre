@@ -55,8 +55,8 @@ def _compile_and_run_plan_capture(fn, *args):
     captured = {}
     finalize_layouts = _passes.finalize_layouts
 
-    def capturing_finalize_layouts(operations):
-        finalize_layouts(operations)
+    def capturing_finalize_layouts(graph):
+        finalize_layouts(graph)
         captured["plan"] = dict(V.graph.restickify_plan)
 
     with patch.object(_passes, "finalize_layouts", capturing_finalize_layouts):
@@ -820,8 +820,9 @@ def test_arange_plus_xt():
     """
     x = torch.randn((S, S), dtype=torch.float16)
     _compare(
-        lambda x: torch.arange(S * S, dtype=torch.float16, device=x.device).view(S, S)
-        + x.t(),
+        lambda x: (
+            torch.arange(S * S, dtype=torch.float16, device=x.device).view(S, S) + x.t()
+        ),
         x,
     )
 
