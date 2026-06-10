@@ -17,6 +17,7 @@ import dataclasses
 import math
 import itertools
 from sympy import Expr, Integer, Symbol, divisors
+from sympy import Expr, Integer, Symbol, divisors
 from .ir import SpyreConstantFallback, SpyreEmptyFallback
 
 from torch._inductor.ir import (
@@ -48,6 +49,7 @@ from .pass_utils import (
     splits_by_index_coeff,
     apply_splits_from_index_coeff,
 )
+from .propagate_hints import get_op_hints
 from .propagate_hints import get_op_hints
 from typing import Callable
 
@@ -644,7 +646,7 @@ def _work_div_hint_by_name(op: ComputedBuffer) -> dict[str, int]:
 
 
 def _has_work_div_hint(op: ComputedBuffer) -> bool:
-    return any(hint_dict.get("work_div") for hint_dict in get_op_hints(op).values())
+    return bool(_work_div_hint_by_name(op))
 
 
 def _resolve_work_div_hint(
@@ -901,9 +903,7 @@ def work_distribution_pass(
                     f"min_splits={committed_splits}, user_splits={user_splits}, "
                     f"op_it_space_splits={op_splits}"
                 )
-            warn_if_per_core_overflow(
-                all_tds, it_space, user_splits, op.get_name(), symbol_meta
-            )
+            warn_if_per_core_overflow(all_tds, it_space, user_splits, op.get_name())
             return
 
     splits, output_dims, reduction_dims = _default_split(
@@ -1144,6 +1144,11 @@ def divide_reduction_op(
                 f"work_division_hint: {op.get_name()} ignores work_div hint "
                 f"because TOPK reductions run single-core."
             )
+        if not config.ignore_work_division_hints and _has_work_div_hint(op):
+            logger.warning(
+                f"work_division_hint: {op.get_name()} ignores work_div hint "
+                f"because TOPK reductions run single-core."
+            )
         return
 
     pass_fn(op, args, max_cores)
@@ -1254,6 +1259,12 @@ def _cost_model_divide_op(op: ComputedBuffer, max_cores: int) -> bool:
         )
 
     it_space_adjusted, stick_vars = adjust_it_space_for_sticks(it_space, all_tds)
+    if (
+        not config.ignore_work_division_hints
+        and _resolve_work_div_hint(op, it_space_adjusted) is not None
+    ):
+        # User hints take ownership of the split decision; do not override them.
+        return False
 
     # op.op_it_space_splits holds span_reduction's commits here: span_reduction
     # runs before this pass, and work_distribution — which would overwrite it —
