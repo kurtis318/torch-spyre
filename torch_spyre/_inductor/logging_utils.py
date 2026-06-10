@@ -113,7 +113,7 @@ def is_inductor_logging_enabled() -> bool:
     Returns:
         True if SPYRE_INDUCTOR_LOG is set to a truthy value, False otherwise
     """
-    if _needs_reinit:
+    if _needs_reinit or _INDUCTOR_LOGGING_ENABLED is None:
         _reinitialize()
     return _INDUCTOR_LOGGING_ENABLED
 

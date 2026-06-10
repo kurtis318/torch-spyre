@@ -276,9 +276,6 @@ def initialize():
         _config = _resolve_config()
         _initialized = True
 
-    from torch_spyre._compat.logging import emit_migration_warning
-
-    emit_migration_warning()
     configure_python_logging()
 
 
