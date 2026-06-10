@@ -37,26 +37,18 @@ OP_OUTPUT_GOOD_FOR_LX_REUSE = frozenset(
     }
 )
 
-OP_GOOD_FOR_LX_INPLACE = frozenset(
-    {
-        "exp",
-        "sub",
-        "add",
-        "rsqrt",
-    }
-)
+OP_GOOD_FOR_LX_INPLACE = [
+    "exp",
+    "sub",
+    "add",
+    "rsqrt",
+]
 
 
 def clone_at_graph_boundaries() -> bool:
     """True when clone ops are eligible for LX, enabling clone insertion at graph
-    input/output boundaries so those buffers can also be LX-pinned.
-
-    Gated by the dedicated ``lx_boundary_clones`` flag (or, legacy, by listing
-    "clone" in OP_OUTPUT_GOOD_FOR_LX_REUSE). It intentionally does NOT consult
-    ``allow_all_ops_in_lx_planning``: that flag widens intermediate-output
-    eligibility and is set broadly (e.g. the LX-planning op suite), so coupling
-    it here would silently turn on the not-yet-correct boundary clone path."""
-    return config.lx_boundary_clones or "clone" in OP_OUTPUT_GOOD_FOR_LX_REUSE
+    input/output boundaries so those buffers can also be LX-pinned."""
+    return "clone" in OP_OUTPUT_GOOD_FOR_LX_REUSE
 
 
 class GraphView:
@@ -76,12 +68,7 @@ class GraphView:
 def calculate_liveness(graph: GraphLowering) -> dict[str, list[int]]:
     """Return a dict mapping each buffer name to the sorted list of operation indices
     at which that buffer is accessed (read or written).  Graph inputs are seeded with
-    an empty list; unused inputs remain empty.
-
-    Note: previously, unused graph inputs did not appear in the returned dict at all.
-    Now they appear with an empty list.  Callers that skip buffers with ``len(uses) <= 1``
-    (e.g. ``_build_bound_buffers``) will still skip unused inputs correctly, since
-    ``len([]) == 0 <= 1``."""
+    an empty list; unused inputs remain empty."""
     liveness: dict[str, list[int]] = {}
     for input_name in graph.graph_input_names:
         liveness[input_name] = []
@@ -90,6 +77,8 @@ def calculate_liveness(graph: GraphLowering) -> dict[str, list[int]]:
         for mem_dep in rw.reads | rw.writes:
             buf_name = mem_dep.name
             if buf_name not in liveness:
+                liveness[buf_name] = []
+            liveness[buf_name].append(i)
                 liveness[buf_name] = []
             liveness[buf_name].append(i)
     return liveness
