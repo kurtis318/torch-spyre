@@ -304,7 +304,11 @@ class TestCloneAtGraphBoundaries(TestScratchpadUsage):
     """
 
     def setUp(self):
-        self.patchers.append(ts_inductor_config.patch("lx_boundary_clones", True))
+        # self.patchers is initialised in __init__ (not in the base setUp), so we can
+        # safely append here before calling super().setUp(), which enters every patcher
+        # in the list via `p.__enter__()`.
+        if "clone" not in OP_OUTPUT_GOOD_FOR_LX_REUSE:
+            self.patchers.append(self.clone_patcher())
         super().setUp()
 
     def _compile_and_inspect(
