@@ -473,6 +473,56 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ]
             ),
         },
+        ("test_add_broadcast_multidim", "test_binary_op_cpu"): {
+            "ops_dict": {"add": torch.add},
+            "param_sets": {
+                "1d_2d": (
+                    cached_randn((256,)),
+                    cached_randn((67, 256)),
+                ),
+                "2d_3d": (
+                    cached_randn((71, 256)),
+                    cached_randn((67, 71, 256)),
+                ),
+                "scalar_broadcast": (
+                    cached_randn((1,)),
+                    cached_randn((67, 256)),
+                ),
+                "3d_4d": (
+                    cached_randn((12, 32, 64)),
+                    cached_randn((7, 12, 32, 64)),
+                ),
+            },
+        },
+        ("test_add_scalar", "test_unary_op_cpu"): {
+            "ops_dict": {
+                "add_scalar_5": lambda x: torch.add(x, 5.0),
+                "add_scalar_neg": lambda x: torch.add(x, -3.5),
+                "add_scalar_zero": lambda x: torch.add(x, 0.0),
+            },
+            "param_sets": make_param_dict(
+                [
+                    ((256,),),
+                    ((67, 256),),
+                    ((67, 71, 256),),
+                ]
+            ),
+        },
+        ("test_add_alpha", "test_binary_op_cpu"): {
+            "ops_dict": {
+                "add_alpha_2": lambda a, b: torch.add(a, b, alpha=2.0),
+                "add_alpha_0.5": lambda a, b: torch.add(a, b, alpha=0.5),
+                "add_alpha_neg": lambda a, b: torch.add(a, b, alpha=-1.0),
+            },
+            "param_sets": make_param_dict(
+                [
+                    ((256,),) * 2,
+                    ((67, 256),) * 2,
+                    ((67, 71, 256),) * 2,
+                    ((6, 7, 12, 256),) * 2,
+                ]
+            ),
+        },
         ("test_addmm", "test_addmm_cpu"): {
             "param_sets": make_param_dict(
                 [
@@ -2415,23 +2465,45 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             "param_sets": {
                 "2d_no_bias": (
                     cached_randn((67, 256)),
-                    cached_randn((128, 256)),
+                    cached_xavier((128, 256)),
                     None,
                 ),
                 "2d_bias": (
                     cached_randn((67, 256)),
-                    cached_randn((128, 256)),
+                    cached_xavier((128, 256)),
                     cached_randn((128,)),
                 ),
                 "3d_no_bias": (
                     cached_randn((3, 17, 256)),
-                    cached_randn((128, 256)),
+                    cached_xavier((128, 256)),
                     None,
                 ),
                 "3d_bias": (
                     cached_randn((3, 17, 256)),
-                    cached_randn((128, 256)),
+                    cached_xavier((128, 256)),
                     cached_randn((128,)),
+                ),
+                # down_proj-shaped cases : large reduction dim
+                # (32768) is numerically unstable with plain randn weights.
+                "down_proj_prefill_12800": (
+                    cached_randn((1, 11, 32768)),
+                    cached_xavier((12800, 32768)),
+                    cached_randn((12800,)),
+                ),
+                "down_proj_prefill_4096": (
+                    cached_randn((1, 11, 32768)),
+                    cached_xavier((4096, 32768)),
+                    cached_randn((4096,)),
+                ),
+                "down_proj_decode_12800": (
+                    cached_randn((1, 1, 32768)),
+                    cached_xavier((12800, 32768)),
+                    cached_randn((12800,)),
+                ),
+                "down_proj_decode_4096": (
+                    cached_randn((1, 1, 32768)),
+                    cached_xavier((4096, 32768)),
+                    cached_randn((4096,)),
                 ),
             }
         },
@@ -2464,6 +2536,26 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     torch.tensor([3.0], dtype=torch.float16),
                 ),
             },
+        },
+        ("test_is_nonzero", "test_is_nonzero_cpu"): {
+            "param_sets": {
+                "float16_true": (torch.tensor([3.14], dtype=torch.float16),),
+                "float16_false": (torch.tensor([0.0], dtype=torch.float16),),
+                "float32_true": (torch.tensor([2.71828], dtype=torch.float32),),
+                "float32_false": (torch.tensor([0.0], dtype=torch.float32),),
+                "negative_true": (torch.tensor([-1.0], dtype=torch.float32),),
+                "bf16_true": (torch.tensor([3.14], dtype=torch.bfloat16),),
+                "bf16_false": (torch.tensor([0.0], dtype=torch.bfloat16),),
+                "bool_true": (torch.tensor([True]),),
+                "bool_false": (torch.tensor([False]),),
+                "from_computation_true": (
+                    torch.tensor([2.0], dtype=torch.float16),
+                    torch.tensor([3.0], dtype=torch.float16),
+                ),
+                "int_true": (torch.tensor([1], dtype=torch.int64),),
+                "int_false": (torch.tensor([0], dtype=torch.int64),),
+            },
+            "expect_fail": ["float32_true", "float32_false", "negative_true"],
         },
         ("test_sdpa", "test_sdpa_cpu"): {
             "param_sets": {
@@ -5123,6 +5215,22 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             "uniform_ produced all identical values"
         )
 
+    def test_random_from_cpu(self):
+        """Test that tensor.random_(-5, 5) fills a tensor with random values in [-5, 5)."""
+        gen = torch.manual_seed(42)
+        x_spyre = torch.zeros(3, 5, dtype=torch.float16, device="spyre")
+        y_cpu = torch.zeros(3, 5, dtype=torch.float16, device="cpu")
+        y_cpu.random_(-5, 5, generator=gen)
+        gen.manual_seed(42)
+        x_spyre.random_(-5, 5, generator=gen)
+        x_cpu = x_spyre.to("cpu")
+
+        assert torch.all(x_cpu >= -5) and torch.all(x_cpu < 5), (
+            f"random_ values out of range [-5, 5): {x_cpu}"
+        )
+        assert not torch.all(x_cpu == x_cpu[0]), "random_ produced all identical values"
+        torch.testing.assert_close(x_cpu, y_cpu, rtol=0.0, atol=0.0)
+
     @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
     def test_tril_cpu(self, x):
         def fn(input):
@@ -5510,6 +5618,43 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             y,
             run_eager=False,
         )
+
+    @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
+    def test_is_nonzero_cpu(self, *args):
+        """Test torch.is_nonzero on Spyre tensors"""
+        if len(args) == 1:
+            x = args[0]
+
+            def fn(t):
+                return torch.is_nonzero(t)
+
+            self.compare_with_cpu(fn, x, cpu_compile=False, run_eager=False)
+
+        elif len(args) == 2:
+            x, y = args
+
+            def fn(a, b):
+                result = a * b
+                return torch.is_nonzero(result)
+
+            self.compare_with_cpu(fn, x, y, cpu_compile=False, run_eager=False)
+
+    @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
+    def test_is_nonzero_error_cases(self):
+        """Test that multi-element tensors raise RuntimeError in compiled context."""
+        # Multi-element tensor - compiled path
+        x_multi = torch.tensor([1.0, 2.0], dtype=torch.float16)
+
+        def fn(t):
+            return torch.is_nonzero(t)
+
+        compiled = torch.compile(fn)
+
+        with pytest.raises(
+            RuntimeError,
+            match="Boolean value of Tensor with more than one value is ambiguous",
+        ):
+            compiled(x_multi.to("spyre"))
 
 
 if __name__ == "__main__":
