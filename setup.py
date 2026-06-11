@@ -218,24 +218,7 @@ if __name__ == "__main__":
             list(DISTRIBUTED_SRC_DIR.glob("*.cpp")) if use_spyre_ccl else []
         )
 
-        # Filenames that belong to the tiny hooks module.
-        # "shared" files are compiled into both _hooks.so and _C.so.
-        hooks_only_files = {"spyre_hooks.cpp"}
-        shared_files = {
-            "spyre_device_enum.cpp",
-            "spyre_generator_impl.cpp",
-            "logging.cpp",
-        }
-        hooks_src_paths = [
-            p for p in sources if p.name in hooks_only_files | shared_files
-        ]
-        core_src_paths = [p for p in sources if p.name not in hooks_only_files]
-        hooks_src_paths = [
-            p.relative_to(ROOT_DIR).as_posix() for p in sorted(hooks_src_paths)
-        ]
-        core_src_paths = [
-            p.relative_to(ROOT_DIR).as_posix() for p in sorted(core_src_paths)
-        ]
+        core_src_paths = [p.relative_to(ROOT_DIR).as_posix() for p in sorted(sources)]
         distributed_src_paths = [
             p.relative_to(ROOT_DIR).as_posix() for p in sorted(distributed_sources)
         ]

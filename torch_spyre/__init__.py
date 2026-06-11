@@ -144,7 +144,9 @@ class _SpyreImpl:
 
     def device_count(self) -> int:
         from . import _C
+        from . import _C
 
+        return _C.device_count()
         return _C.device_count()
 
     def current_device(self) -> int:
@@ -254,6 +256,7 @@ def _autoload():
     _autoload._ran = True
 
     import torch  # noqa: E402
+    from . import _C  # noqa: F401
 
     # Set all the appropriate state on PyTorch
     torch.utils.rename_privateuse1_backend(DEVICE_NAME)
