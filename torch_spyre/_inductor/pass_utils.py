@@ -480,72 +480,6 @@ def host_coordinates(layout: FixedLayout, dep: MemoryDep) -> list[sympy.Expr]:
     return compute_coordinates(concrete_size, concrete_stride, dep.ranges, index)
 
 
-def identify_matmul_inputs(
-    inputs: list[MemoryDep],
-    write_dep: MemoryDep,
-) -> tuple[MemoryDep, MemoryDep] | tuple[None, None]:
-    """Identify Input1 (x) and Input2 (y) of a BatchMatmul op.
-
-    Uses the BatchMatmul semantic dimension definitions:
-      reduction_dim: in Input1, Input2,  NOT Output
-      generated_dim: in Input2, Output,  NOT Input1
-      preserved_dim: in Input1, Output,  NOT Input2
-      noreuse_dim:   in Input1, Input2,  Output
-
-    Identifies y by its generated_dim (N): present in y and the output, absent
-    from x.  This is more robust than identifying x by its preserved_dim (M):
-    when M=1, M is constant-folded out of both x's and the output's index
-    simultaneously, making the preserved_dim test blind.  N is immune — even
-    N=1 ranges stay in the output's index expression.
-
-    Returns (None, None) if y cannot be identified.
-    """
-    assert len(inputs) == 2
-    a, b = inputs[0], inputs[1]
-    out_syms = write_dep.index.free_symbols
-    syms_a = a.index.free_symbols
-    syms_b = b.index.free_symbols
-
-    # b has generated_dim → b is y, a is x
-    if (syms_b & out_syms) - syms_a:
-        return a, b
-    # a has generated_dim → a is y, b is x
-    if (syms_a & out_syms) - syms_b:
-        return b, a
-    return None, None
-
-
-def find_reduction_var(x_dep: MemoryDep, out_dep: MemoryDep) -> sympy.Symbol:
-    """Return the single loop variable that appears in x's index but not in the output's.
-
-    Raises Unsupported if the count is not exactly 1.
-    """
-    reduction_vars = x_dep.index.free_symbols - out_dep.index.free_symbols
-    if len(reduction_vars) != 1:
-        raise Unsupported(
-            f"expected exactly 1 reduction variable, got {reduction_vars}"
-        )
-    return next(iter(reduction_vars))
-
-
-def find_matmul_generated_var(
-    y_dep: MemoryDep, x_dep: MemoryDep, out_dep: MemoryDep
-) -> sympy.Symbol:
-    """Return the single loop variable that appears in y's and the output's index but not in x's.
-
-    This is the N (generation) dimension of a matmul.
-    Raises Unsupported if the count is not exactly 1.
-    """
-    generated_vars = (
-        y_dep.index.free_symbols & out_dep.index.free_symbols
-    ) - x_dep.index.free_symbols
-    if len(generated_vars) != 1:
-        raise Unsupported(
-            f"expected exactly 1 generated variable, got {generated_vars}"
-        )
-    return next(iter(generated_vars))
-
-
 def is_stick_expr_offset_free(stick_expr: sympy.Expr, elems_per_stick: int) -> bool:
     """Check if a stick expression is free of constant offsets.
 
@@ -579,8 +513,28 @@ def _check_stick_expr_supported(stick_expr: sympy.Expr, elems_per_stick: int) ->
     offset_free = is_stick_expr_offset_free(stick_expr, elems_per_stick)
     has_offset = _is_stick_expr_with_offset(stick_expr, elems_per_stick)
     if not (offset_free or has_offset):
+    return is_supported_mod or is_bare_var or is_zero
+
+
+def _is_stick_expr_with_offset(stick_expr: sympy.Expr, elems_per_stick: int) -> bool:
+    """Return True if stick_expr is an offset variant: Mod(var, N) + c or var + c."""
+    if not isinstance(stick_expr, sympy.Add):
+        return False
+    free_args = [a for a in stick_expr.args if a.free_symbols]
+    return len(free_args) == 1 and is_stick_expr_offset_free(
+        free_args[0], elems_per_stick
+    )
+
+
+def _check_stick_expr_supported(stick_expr: sympy.Expr, elems_per_stick: int) -> None:
+    """Raise Unsupported for stick expressions may be valid but are not yet supported."""
+    offset_free = is_stick_expr_offset_free(stick_expr, elems_per_stick)
+    has_offset = _is_stick_expr_with_offset(stick_expr, elems_per_stick)
+    if not (offset_free or has_offset):
         raise Unsupported(
             f"Unexpected stick expression {stick_expr!r}: expected "
+            f"Mod(var, {elems_per_stick}), a bare variable, 0, or any of those "
+            f"with a constant offset"
             f"Mod(var, {elems_per_stick}), a bare variable, 0, or any of those "
             f"with a constant offset"
         )
@@ -883,8 +837,24 @@ def compute_restickify_needed(
     # Input stick with an offset always needs restickify to remove the offset.
     in_stick_offset_free = is_stick_expr_offset_free(idc[-1], in_stl.elems_per_stick())
     if in_stick_offset_free and stick_compatible([idc, out_idc]):
+    # Input stick with an offset always needs restickify to remove the offset.
+    in_stick_offset_free = is_stick_expr_offset_free(idc[-1], in_stl.elems_per_stick())
+    if in_stick_offset_free and stick_compatible([idc, out_idc]):
         return False, None
     ic = host_coordinates(in_host, in_dep)
+    target_stick = out_idc[-1]
+
+    if target_stick == sympy.S.Zero and not in_stick_offset_free:
+        # No output dim carries the input's stick var, so compute_restickify_target_layout
+        # would fail to match. Promote the reduction var to the stick dimension so the
+        # restickify removes the offset.
+        reduction_vars = in_dep.index.free_symbols - out_dep.index.free_symbols
+        if reduction_vars:
+            red_var = next(iter(reduction_vars))
+            target_stick = sympy.Mod(red_var, in_stl.elems_per_stick())
+    return True, compute_restickify_target_layout(
+        in_stl, in_host, target_stick, ic, idc
+    )
     target_stick = out_idc[-1]
 
     if target_stick == sympy.S.Zero and not in_stick_offset_free:
