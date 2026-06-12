@@ -15,11 +15,6 @@ on:
         required: false
         type: string
         default: ''
-      repository:
-        description: Full clone URL of the fork to check out (e.g. "https://github.com/myuser/torch-spyre.git"); leave empty for the base repo
-        required: true
-        type: string
-        default: ''
       pr_url_hash:
         description: |
           Hash of the full URL of the PR that triggered this run.
@@ -43,6 +38,8 @@ on:
         default: true
 
 concurrency:
+  group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' && github.event.pull_request.html_url) || (github.event_name == 'workflow_dispatch'
+    && inputs.pr_url_hash != '' && inputs.pr_url_hash) || github.ref }}
   group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' && github.event.pull_request.html_url) || (github.event_name == 'workflow_dispatch'
     && inputs.pr_url_hash != '' && inputs.pr_url_hash) || github.ref }}
   cancel-in-progress: true
