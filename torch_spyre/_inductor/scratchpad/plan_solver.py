@@ -68,6 +68,22 @@ def _assert_in_place_relationships(buffers: list["LifetimeBoundBuffer"]) -> None
             )
 
 
+def _assert_in_place_relationships(buffers: list["LifetimeBoundBuffer"]) -> None:
+    """Assert that all declared in-place parent/child pairs satisfy required invariants."""
+    buf_by_name = {b.name: b for b in buffers}
+    for child in buffers:
+        for parent_name in child.in_place_parents:
+            parent = buf_by_name[parent_name]
+            assert parent.end_time == child.start_time + 1, (
+                f"In-place parent {parent_name}.end_time={parent.end_time} must equal "
+                f"child {child.name}.start_time+1={child.start_time + 1}"
+            )
+            assert child.size <= parent.size, (
+                f"In-place child {child.name}.size={child.size} "
+                f"must be <= parent {parent_name}.size={parent.size}"
+            )
+
+
 class MemoryPlanSolver(ABC):
     """
     An abstract class for defining algorithms which solve
