@@ -24,6 +24,8 @@ from torch._inductor.virtualized import V
 
 from .errors import Unsupported
 
+from .errors import Unsupported
+
 
 def find_repeat_vars(index_exprs, var_ranges):
     repeat_info = {}
@@ -133,6 +135,7 @@ def compute_coordinates(
     stride: Sequence[sympy.Expr],
     var_ranges: dict[sympy.Symbol, sympy.Expr],
     index: sympy.Expr,
+    indirect_load_subs: "dict | None" = None,
     indirect_load_subs: "dict | None" = None,
 ) -> list[sympy.Expr]:
     """
@@ -245,6 +248,31 @@ def compute_coordinates(
             range_val = inferred
         else:
             range_val = var_ranges[var]
+            # Indirect index symbols (e.g. tmp0 from an indirect load) appear
+            # in the index expression but are not loop variables.  Infer their
+            # range from the layout: find the dim whose stride equals the
+            # symbol's coefficient in the index.
+            term = index.xreplace({v: 0 for v in vars - {var}})
+            try:
+                coeff = int(term.xreplace({var: 1}))
+            except (TypeError, ValueError):
+                continue
+            inferred = next(
+                (
+                    sz
+                    for st, sz in zip(stride, size)
+                    if int(st) == coeff and int(sz) > 1
+                ),
+                None,
+            )
+            if inferred is None:
+                raise Unsupported(
+                    f"indirect symbol {var} (coeff={coeff}) in index {index} "
+                    f"has no matching stride in layout {list(zip(stride, size))}"
+                )
+            range_val = inferred
+        else:
+            range_val = var_ranges[var]
 
         # Skip vars with trivial range.  For symbolic ranges we cannot
         # statically determine triviality, so we assume they are non-trivial.
@@ -268,6 +296,8 @@ def compute_coordinates(
         limit = term.xreplace({var: range_val})
         add_term(var=var, step=step, limit=limit)
 
+    if indirect_load_subs:
+        coordinates = [c.xreplace(indirect_load_subs) for c in coordinates]
     if indirect_load_subs:
         coordinates = [c.xreplace(indirect_load_subs) for c in coordinates]
     return coordinates
@@ -380,6 +410,11 @@ def normalize_coordinates(
             else:
                 assert offset == 0
                 terms.append(Term(None, None, None, None, dim_size))
+            continue
+        # If all free symbols are indirect (not loop vars), pass the raw
+        # coordinate through as an opaque offset on a var=None term.
+        if not vars.issubset(var_ranges.keys()):
+            terms.append(Term(None, None, None, None, dim_size, offset=coordinate))
             continue
         # If all free symbols are indirect (not loop vars), pass the raw
         # coordinate through as an opaque offset on a var=None term.
@@ -598,9 +633,10 @@ def align_tensors(
         ]:
             # for each term except last one (stick dim)
             if var is None:
-                # offset holds either 0 (broadcast/scalar dim) or an IndirectAccess
+                # offset holds either 0 (broadcast/scalar dim) or an IndexLoad
                 # (indirect load access) that must pass through unchanged.
                 size.append(dim_size)
+                coordinates.append(offset)
                 coordinates.append(offset)
                 continue
             # decompose dimension according to splits and tiling of stick dim

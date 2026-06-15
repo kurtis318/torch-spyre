@@ -16,6 +16,7 @@ import math
 import warnings
 from dataclasses import dataclass
 from typing import Any, Callable, NamedTuple, Optional, TypeVar, Union
+from typing import Any, Callable, NamedTuple, Optional, TypeVar, Union
 
 import torch
 import sympy
@@ -35,7 +36,7 @@ from torch._inductor.dependencies import MemoryDep, ReadWrites
 from torch._inductor.virtualized import V
 from torch_spyre._C import SpyreTensorLayout, get_elem_in_stick
 from torch_spyre._inductor.errors import Unsupported
-from torch_spyre._inductor.op_spec import IndirectAccess
+from torch_spyre._inductor.op_spec import IndexLoad
 
 from . import config
 from .codegen.superdsc import (
@@ -283,11 +284,7 @@ def get_mem_deps_from_rw(read_writes: ReadWrites) -> list[SchedNodeArg]:
     for arg in read_writes.reads:
         # Indirect deps are index tensors (e.g. gather indices) whose access
         # pattern is data-dependent; they cannot drive work-division planning.
-        if (
-            isinstance(arg, MemoryDep)
-            and isinstance(arg.index, sympy.Basic)
-            and not arg.is_indirect()
-        ):
+        if isinstance(arg, MemoryDep) and not arg.is_indirect():
             buf = V.graph.get_buffer(arg.name)
             res.append(SchedNodeArg(arg, _fixed_read_layout(buf)))
     return res
@@ -299,56 +296,9 @@ def op_out_coords(op: ComputedBuffer) -> list[sympy.Expr]:
     return host_coordinates(op.get_layout(), output_dep)
 
 
-def _find_scatter_index_buf_names(op: ComputedBuffer) -> set[str]:
-    """Return names of deps whose loaded values are used as indices in scatter output_indexer.
-
-    For Scatter ops the indirect index is encoded in the output_indexer closure.
-    Extract the index buffer names directly from the 'indices' closure variable.
-    """
-    from torch._inductor.ir import Scatter
-
-    if not isinstance(op.data, Scatter):
-        return set()
-
-    fn = op.data.output_indexer
-    if fn.__closure__ is None:
-        return set()
-
-    freevars = fn.__code__.co_freevars
-    try:
-        cells = {
-            name: cell.cell_contents for name, cell in zip(freevars, fn.__closure__)
-        }
-    except ValueError:
-        return set()
-
-    if "indices" not in cells:
-        logger.warning(
-            "Scatter.output_indexer closure has no 'indices' variable — "
-            "Inductor may have renamed it. Scatter index tensors will not be "
-            "excluded from stick compatibility checks. (freevars: %s)",
-            list(freevars),
-        )
-        return set()
-    indices = cells["indices"]
-    names = set()
-    for idx_tensor in indices:
-        if idx_tensor is None:
-            continue
-        # Unwrap TensorBox -> StorageBox -> Buffer to get the name
-        node = idx_tensor
-        while hasattr(node, "data"):
-            node = node.data
-        if hasattr(node, "name") and node.name is not None:
-            names.add(node.name)
-    return names
-
-
 def indirect_index_dep_names(op: ComputedBuffer) -> set[str]:
-    """Return names of deps whose loaded values are used as indices in loads or stores."""
-    names = {expr.base.name for expr in _build_indirect_load_subs(op).values()}
-    names |= _find_scatter_index_buf_names(op)
-    return names
+    """Return names of deps whose loaded values are used as indices in other loads."""
+    return {expr.base.name for expr in _build_indirect_load_subs(op).values()}
 
 
 class _LoadSentinel:
@@ -411,11 +361,7 @@ def _build_indirect_load_subs(op: ComputedBuffer) -> dict[sympy.Symbol, sympy.Ex
     from sympy import IndexedBase
 
     rw = op.get_read_writes()
-    reads = [
-        d
-        for d in rw.reads
-        if isinstance(d, MemoryDep) and isinstance(d.index, sympy.Basic)
-    ]
+    reads = [d for d in rw.reads if isinstance(d, MemoryDep)]
     if not any(d.is_indirect() for d in reads):
         return {}
     indirect_index_buf_map = _find_indirect_index_bufs(op)
@@ -436,26 +382,22 @@ def _build_indirect_load_subs(op: ComputedBuffer) -> dict[sympy.Symbol, sympy.Ex
     return result
 
 
-def indirect_access_subs_from_op(
-    op: ComputedBuffer,
-) -> "dict[sympy.Symbol, sympy.Expr]":
-    """Build {indirect_sym → IndirectAccess(name)} for a ComputedBuffer (pre-scheduler).
+def indirect_load_subs_from_op(op: ComputedBuffer) -> "dict[sympy.Symbol, sympy.Expr]":
+    """Build {indirect_sym → IndexLoad(name)} for a ComputedBuffer (pre-scheduler).
 
     Used before scheduling, when indirect_vars is not yet available.
     Re-executes inner_fn via _IndirectIndexFinder to discover which buffer's
     load produced each indirect index. The resulting subs can be passed to
-    device_coordinates() to replace indirect symbols with IndirectAccess(name).
+    device_coordinates() to replace indirect symbols with IndexLoad(name).
     """
     raw = _build_indirect_load_subs(op)
-    return {
-        sym: IndirectAccess(sympy.Symbol(expr.base.name)) for sym, expr in raw.items()
-    }
+    return {sym: IndexLoad(sympy.Symbol(expr.base.name)) for sym, expr in raw.items()}
 
 
-def indirect_access_subs_from_kernel(
+def indirect_load_subs_from_kernel(
     indirect_vars: "dict[sympy.Symbol, Any]",
 ) -> "dict[sympy.Symbol, sympy.Expr]":
-    """Build {indirect_sym → IndirectAccess(name)} from SpyreKernel.indirect_vars (post-scheduler).
+    """Build {indirect_sym → IndexLoad(name)} from SpyreKernel.indirect_vars (post-scheduler).
 
     Used after scheduling, where indirect_vars directly maps the fresh symbol
     returned by indirect_indexing() to its source TensorAccess.
@@ -463,9 +405,7 @@ def indirect_access_subs_from_kernel(
     The resulting subs can be passed to device_coordinates() or applied
     directly to already-computed coordinate expressions.
     """
-    return {
-        sym: IndirectAccess(sympy.Symbol(ta.name)) for sym, ta in indirect_vars.items()
-    }
+    return {sym: IndexLoad(sympy.Symbol(ta.name)) for sym, ta in indirect_vars.items()}
 
 
 def host_coordinates(layout: FixedLayout, dep: MemoryDep) -> list[sympy.Expr]:
@@ -547,10 +487,10 @@ def device_coordinates(
 ) -> list[sympy.Expr]:
     """Compute device-space coordinates for a tensor access.
 
-    indirect_load_subs: optional {indirect_sym → IndirectAccess(name)} mapping produced by
-        indirect_access_subs_from_op() (pre-scheduler) or indirect_access_subs_from_kernel()
+    indirect_load_subs: optional {indirect_sym → IndexLoad(name)} mapping produced by
+        indirect_load_subs_from_op() (pre-scheduler) or indirect_load_subs_from_kernel()
         (post-scheduler). When provided, indirect symbols in the coordinates are
-        replaced with IndirectAccess expressions, giving indirect-aware coordinates.
+        replaced with IndexLoad expressions, giving gather-aware coordinates.
     """
     # device_size and stride_map come from the C++ SpyreTensorLayout and are
     # already concrete, so no concretization is needed here.
@@ -560,6 +500,7 @@ def device_coordinates(
         stl.stride_map,
         dep.ranges,
         index,
+        indirect_load_subs,
         indirect_load_subs,
     )
     _check_stick_expr_supported(coords[-1], stl.elems_per_stick())
@@ -814,6 +755,7 @@ def compute_restickify_needed(
     out_stl: SpyreTensorLayout,
     out_dep: MemoryDep,
     op: "ComputedBuffer | None" = None,
+    op: "ComputedBuffer | None" = None,
 ) -> "tuple[bool, SpyreTensorLayout | None]":
     """Determine whether a restickify is needed for one (in_stl, out_stl) pair.
 
@@ -823,11 +765,16 @@ def compute_restickify_needed(
     op: when provided, index-role deps (gather indices) are never stick-constrained
     and always return (False, None).
 
+    op: when provided, index-role deps (gather indices) are never stick-constrained
+    and always return (False, None).
+
     Returns:
       (False, None)   — stick-compatible: no restickify needed
       (True, stl)     — restickify needed, stl is the target STL for the restickified input
       (True, None)    — restickify needed but infeasible
     """
+    if op is not None and in_dep.name in indirect_index_dep_names(op):
+        return False, None
     if op is not None and in_dep.name in indirect_index_dep_names(op):
         return False, None
     idc = device_coordinates(in_stl, in_dep)

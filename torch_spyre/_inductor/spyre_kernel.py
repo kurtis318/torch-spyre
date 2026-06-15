@@ -28,6 +28,7 @@ from torch._inductor.codegen.common import (
 from torch_spyre._inductor.dtype_ops import DtypeOpTable
 from torch._inductor.ops_handler import DefaultHandler, StoreMode
 from torch._inductor.utils import IndentedBuffer, sympy_index_symbol, sympy_subs
+from torch._inductor.utils import IndentedBuffer, sympy_index_symbol, sympy_subs
 from torch._inductor.virtualized import V
 
 from .constants import (
@@ -46,12 +47,12 @@ from .pass_utils import (
     concretize_index,
     apply_splits_from_index_coeff,
     iteration_space,
-    indirect_access_subs_from_kernel,
+    indirect_load_subs_from_kernel,
 )
 from .views import compute_coordinates, align_tensors
 from .logging_utils import get_inductor_logger
 from .op_spec import (
-    IndirectAccess,
+    IndexLoad,
     LoopSpec,
     OpSpec,
     TensorArg,
@@ -441,6 +442,20 @@ class SpyreKernelOpsHandler(DefaultHandler):
             return sym
         return sympy_index_symbol(str(index_var))
 
+    def indirect_indexing(
+        self,
+        index_var: Any,
+        size: Any,
+        check: bool = True,
+        wrap_neg: bool = True,
+    ) -> sympy.Symbol:
+        if isinstance(index_var, TensorAccess):
+            sym = sympy_index_symbol(f"indirect{self.kernel._indirect_var_count}")
+            self.kernel._indirect_var_count += 1
+            self.kernel.indirect_vars[sym] = index_var
+            return sym
+        return sympy_index_symbol(str(index_var))
+
     def scan(
         self,
         dtypes: tuple[torch.dtype, ...],
@@ -462,6 +477,8 @@ class SpyreKernel(Kernel[CSEVariable]):
         self.spyre_kernel_args: list[Tuple[str, TensorArg]] = []
         self.indirect_vars: dict[sympy.Symbol, TensorAccess] = {}
         self._indirect_var_count: int = 0
+        self.indirect_vars: dict[sympy.Symbol, TensorAccess] = {}
+        self._indirect_var_count: int = 0
 
     def __enter__(self) -> Self:
         super().__enter__()
@@ -476,6 +493,11 @@ class SpyreKernel(Kernel[CSEVariable]):
         name: str,
         tensor: TensorAccess,
         opspec_name: "str | None" = None,
+        self,
+        is_input: bool,
+        name: str,
+        tensor: TensorAccess,
+        opspec_name: "str | None" = None,
     ) -> TensorArg:
         it_space = iteration_space(self.current_node)
         # With dynamic=True the host index may contain symbolic strides
@@ -484,7 +506,7 @@ class SpyreKernel(Kernel[CSEVariable]):
 
         index = concretize_index(tensor.index, set(it_space.keys()))
         indirect_load_subs = (
-            indirect_access_subs_from_kernel(self.indirect_vars)
+            indirect_load_subs_from_kernel(self.indirect_vars)
             if self.indirect_vars
             else None
         )
@@ -493,6 +515,7 @@ class SpyreKernel(Kernel[CSEVariable]):
             tensor.layout.device_layout.stride_map,
             it_space,
             index,
+            indirect_load_subs,
             indirect_load_subs,
         )
         tensor_arg = TensorArg(
@@ -504,6 +527,7 @@ class SpyreKernel(Kernel[CSEVariable]):
             tensor.layout.allocation,
             stride_map=list(tensor.layout.device_layout.stride_map),
             per_tile_fixed=getattr(tensor.layout, "per_tile_fixed", False),
+            name=opspec_name,
             name=opspec_name,
         )
         if (
@@ -521,6 +545,8 @@ class SpyreKernel(Kernel[CSEVariable]):
         op_info: dict[str, Any],
     ) -> OpSpec:
         for arg in args:
+            if _is_indirect_index_arg(arg, args):
+                continue
             if _is_indirect_index_arg(arg, args):
                 continue
             if not (
@@ -671,6 +697,18 @@ class SpyreKernel(Kernel[CSEVariable]):
                     for sym in sorted(indirect_syms, key=str)
                     for idx_tensor in [self.indirect_vars[sym]]
                 ]
+            indirect_syms = _indirect_syms_used(value, self.indirect_vars)
+            if indirect_syms:
+                args += [
+                    self.create_tensor_arg(
+                        True,
+                        idx_tensor.name,
+                        idx_tensor,
+                        opspec_name=idx_tensor.name,
+                    )
+                    for sym in sorted(indirect_syms, key=str)
+                    for idx_tensor in [self.indirect_vars[sym]]
+                ]
             for input in value.arguments:
                 if isinstance(input, TensorAccess):
                     args.append(self.create_tensor_arg(True, input.name, input))
@@ -682,9 +720,8 @@ class SpyreKernel(Kernel[CSEVariable]):
         elif isinstance(value, TensorAccess):
             # Reshapes, transposes, and other dataops.
             if self.indirect_vars:
-                # Gather/scatter: create_tensor_arg applies indirect_access_subs automatically
+                # Gather: create_tensor_arg applies indirect_load_subs automatically
                 # (via compute_coordinates) so all args come out with correct coordinates.
-                # TODO: scatter codegen (IndirectAccess on output TensorArg → SuperDSC) not yet wired up.
                 args = [
                     self.create_tensor_arg(
                         True,
@@ -801,9 +838,9 @@ class SpyreKernel(Kernel[CSEVariable]):
             simplify_op_spec(op_spec)
 
         def sympy_str(x: sympy.Expr) -> str:
-            if isinstance(x, IndirectAccess):
+            if isinstance(x, IndexLoad):
                 name_sym = x.args[0]
-                return f"IndirectAccess('{name_sym}')"
+                return f"IndexLoad('{name_sym}')"
             return "sympify('" + str(x) + "')"
 
         # Now that all loads/stores have been processed we know the final kernel_args and can map names to indices
@@ -858,7 +895,7 @@ def _is_indirect_index_arg(arg: TensorArg, args: Sequence[TensorArg]) -> bool:
     """Return True if arg is an indirect index tensor in this op spec.
 
     An arg is an indirect index tensor if it has a name and that name appears
-    as the argument of an IndirectAccess in another arg's device_coordinates.
+    as the argument of an IndexLoad in another arg's device_coordinates.
     """
     if arg.name is None:
         return False
@@ -866,7 +903,7 @@ def _is_indirect_index_arg(arg: TensorArg, args: Sequence[TensorArg]) -> bool:
         arg.name == sym.name
         for a in args
         for coord in a.device_coordinates
-        for il in coord.atoms(IndirectAccess)
+        for il in coord.atoms(IndexLoad)
         for sym in il.args
     )
 
@@ -959,6 +996,8 @@ def _codegen_op_spec_list(specs, buf: IndentedBuffer, sympy_str) -> None:
                                 buf.writeline("per_tile_fixed=True,")
                             if arg.name is not None:
                                 buf.writeline(f"name={arg.name!r},")
+                            if arg.name is not None:
+                                buf.writeline(f"name={arg.name!r},")
                         buf.writeline("),")
                 buf.writeline("]")
             buf.writeline("),")
@@ -967,14 +1006,19 @@ def _codegen_op_spec_list(specs, buf: IndentedBuffer, sympy_str) -> None:
 def simplify_op_spec(op_spec):
     it_space = op_spec.iteration_space
 
+    it_space = op_spec.iteration_space
+
     new_op_space_splits, new_tensors = align_tensors(
         it_space,
+        it_space,
         [
+            {"size": arg.device_size, "coordinates": arg.device_coordinates}
             {"size": arg.device_size, "coordinates": arg.device_coordinates}
             for arg in op_spec.args
         ],
     )
     op_spec.iteration_space = new_op_space_splits
+
 
     for arg, t in zip(op_spec.args, new_tensors):
         old_coords = arg.device_coordinates
