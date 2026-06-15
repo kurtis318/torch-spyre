@@ -903,7 +903,9 @@ def work_distribution_pass(
                     f"min_splits={committed_splits}, user_splits={user_splits}, "
                     f"op_it_space_splits={op_splits}"
                 )
-            warn_if_per_core_overflow(all_tds, it_space, user_splits, op.get_name())
+            warn_if_per_core_overflow(
+                all_tds, it_space, user_splits, op.get_name(), symbol_meta
+            )
             return
 
     splits, output_dims, reduction_dims = _default_split(
