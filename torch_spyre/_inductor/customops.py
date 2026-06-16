@@ -14,9 +14,10 @@
 
 from typing import Optional, Sequence
 import torch
+import torch._dynamo
 from torch._inductor.fx_passes.reinplace import inplaceable_ops, InplaceableOp
-from torch_spyre.ops.fallbacks import warn_fallback
 from torch_spyre.ops.eager import compile_once
+from torch_spyre.ops.fallbacks import warn_fallback
 
 from .errors import Unsupported
 
@@ -190,51 +191,6 @@ def _(
     return input.new_empty(input.size())
 
 
-# spyre::full is registered via the low-level Library API rather than
-# torch.library.custom_op because the latter dispatches through
-# python_dispatch.cpp's `redispatch_boxed` lambda, whose c_return event is
-# dropped by CPython's sys.setprofile when the lambda releases the GIL and
-# calls back into Python. With with_stack=True profilers the dropped c_return
-# corrupts post-processing of the outer pybind frame, attributing trace-end
-# timestamps to every spyre::full event. The Library API path is direct C
-# dispatch and pairs c_call/c_return correctly.
-#
-# Because spyre::full takes no Tensor arguments, BackendSelect cannot infer a
-# device-specific dispatch key, so the impl is registered on
-# CompositeExplicitAutograd which fires before BackendSelect for tensorless
-# schemas. The implementation routes by the `device` argument internally.
-_spyre_lib = torch.library.Library("spyre", "FRAGMENT")
-_spyre_lib.define(
-    "full(int[] size, Scalar fill_value, Device device, *, "
-    "ScalarType? dtype=None) -> Tensor"
-)
-
-
-def spyre_full(
-    size: Sequence[int],
-    fill_value: torch.types.Number,
-    device: torch.device,
-    dtype: Optional[torch.dtype] = None,
-) -> torch.Tensor:
-    # Fall back to CPU.
-    warn_fallback("torch.ops.spyre.full")
-    tmp = torch.full(size, fill_value, dtype=dtype, device="cpu")
-    return tmp.to(device)
-
-
-def _spyre_full_meta(
-    size: Sequence[int],
-    fill_value: torch.types.Number,
-    device: torch.device,
-    dtype: Optional[torch.dtype] = None,
-) -> torch.Tensor:
-    return torch.empty(size, dtype=dtype, device=device)
-
-
-_spyre_lib.impl("full", spyre_full, "CompositeExplicitAutograd")
-_spyre_lib.impl("full", _spyre_full_meta, "Meta")
-
-
 @torch.library.custom_op("spyre::empty", mutates_args=(), device_types="spyre")
 def spyre_empty(
     size: Sequence[int],
@@ -265,26 +221,6 @@ def logical_not(input: torch.Tensor) -> torch.Tensor:
 @logical_not.register_fake
 def _(input: torch.Tensor):
     return input.new_empty(input.size())
-
-
-@torch.library.custom_op("spyre::ones_scalar", mutates_args=(), device_types="spyre")
-def spyre_ones_scalar(
-    device: torch.device,
-    dtype: Optional[torch.dtype] = None,
-) -> torch.Tensor:
-    """Return a 1-element tensor containing 1 on Spyre. Used for ones via identity broadcast."""
-    warn_fallback("torch.ops.spyre.ones_scalar")
-    out = torch.empty(1, dtype=dtype, device=device)
-    out.fill_(1)
-    return out
-
-
-@spyre_ones_scalar.register_fake
-def _ones_scalar_fake(
-    device: torch.device,
-    dtype: Optional[torch.dtype] = None,
-):
-    return torch.empty(1, dtype=dtype, device="spyre")
 
 
 @torch.library.custom_op(
@@ -320,7 +256,19 @@ def overwrite(
     offsets: Sequence[int],
     compiled,
 ) -> None:
-    return compiled(input, output, dims, offsets)
+    # specialize_int=True installs int-equality guards on the int-list
+    # args so each unique (dims, offsets) triggers a fresh trace and a
+    # fresh SDSC binary; without this dynamo's default specialize_int=
+    # False reuses one baked binary across all values and scatters all
+    # writes to the first call's offset (see test_overwrite.py).
+    # Patch is call-scoped to leave process-wide dynamo behavior alone.
+    # Note: this gives one compiled binary per unique (input shape, dims,
+    # offsets) tuple. dynamo's cache_size_limit is bumped to 1024 in
+    # torch_spyre/__init__.py — long-running workloads that scatter into
+    # many distinct slots can blow past that. Symbolic offsets (one
+    # binary, any value) are tracked in issues #220 / #1371-3.
+    with torch._dynamo.config.patch(specialize_int=True):
+        return compiled(input, output, dims, offsets)
 
 
 @overwrite.register_fake
@@ -342,7 +290,7 @@ def overwrite_cpu(
 ) -> None:
     sliced_t = output
     for i, dim in enumerate(dims):
-        sliced_t = torch.narrow(sliced_t, dim, offsets[i], 1)
+        sliced_t = torch.narrow(sliced_t, dim, offsets[i], input.size(dim))
     sliced_t.copy_(input)
 
 
@@ -413,6 +361,91 @@ def _(input: torch.Tensor, dim: int, keepdim: bool = False):
     values = input.new_empty(output_shape)
     indices = torch.empty(output_shape, dtype=torch.int64, device=input.device)
     return (values, indices)
+
+
+@torch.library.custom_op("spyre::unfold", mutates_args=(), device_types="spyre")
+def spyre_unfold(
+    input: torch.Tensor,
+    kernel_size: Sequence[int],
+    dilation: Optional[Sequence[int]] = None,
+    padding: Optional[Sequence[int]] = None,
+    stride: Optional[Sequence[int]] = None,
+) -> torch.Tensor:
+    """
+    Im2col unfold operation via torch.nn.functional.unfold.
+    Converts (N, C, H, W) input to (N, C*K_h*K_w, L) where L = H_out * W_out.
+    Uses CPU fallback for the unfold operation.
+    """
+
+    dilation = dilation or (1, 1)
+    padding = padding or (0, 0)
+    stride = stride or (1, 1)
+
+    warn_fallback("torch.ops.spyre.unfold")
+    # Move to CPU, perform unfold, move back to Spyre
+    input_cpu = input.to("cpu")
+    result_cpu = torch.nn.functional.unfold(
+        input_cpu,
+        kernel_size=kernel_size,
+        dilation=dilation,
+        padding=padding,
+        stride=stride,
+    )
+    return result_cpu.to(input.device)
+
+
+@spyre_unfold.register_fake
+def _(
+    input: torch.Tensor,
+    kernel_size: Sequence[int],
+    dilation: Optional[Sequence[int]] = None,
+    padding: Optional[Sequence[int]] = None,
+    stride: Optional[Sequence[int]] = None,
+) -> torch.Tensor:
+    dilation = dilation or (1, 1)
+    padding = padding or (0, 0)
+    stride = stride or (1, 1)
+
+    N, C, H_in, W_in = input.shape
+    K_h, K_w = kernel_size
+    dil_h, dil_w = dilation
+    pad_h, pad_w = padding
+    stride_h, stride_w = stride
+
+    H_out = (H_in + 2 * pad_h - dil_h * (K_h - 1) - 1) // stride_h + 1
+    W_out = (W_in + 2 * pad_w - dil_w * (K_w - 1) - 1) // stride_w + 1
+
+    return input.new_empty((N, C * K_h * K_w, H_out * W_out))
+
+
+@torch.library.custom_op(
+    "spyre::reshape_via_cpu", mutates_args=(), device_types="spyre"
+)
+def spyre_reshape_via_cpu(
+    input: torch.Tensor,
+    shape: Sequence[int],
+) -> torch.Tensor:
+    """
+    Reshape operation that executes on CPU to avoid stick-alignment issues.
+
+    When reshaping produces a shape with innermost dimension that doesn't align
+    with stick boundaries (64 elements for fp16), the Inductor coordinate
+    computation fails. This op moves to CPU, reshapes, then moves back to Spyre.
+
+    This is similar to unfold, which also uses CPU fallback for correct layouts.
+    """
+    warn_fallback("torch.ops.spyre.reshape_via_cpu")
+    input_cpu = input.to("cpu")
+    result_cpu = input_cpu.reshape(shape)
+    return result_cpu.to(input.device)
+
+
+@spyre_reshape_via_cpu.register_fake
+def _(
+    input: torch.Tensor,
+    shape: Sequence[int],
+) -> torch.Tensor:
+    return input.new_empty(shape)
 
 
 @torch.library.custom_op("spyre::min_dim_int64_fallback", mutates_args=())
@@ -499,3 +532,14 @@ def _constant(
     fill_value: torch.types.Number, dtype: torch.dtype, device: torch.device
 ) -> torch.types.Number:
     return fill_value
+
+
+@torch.library.custom_op("spyre::to_dtype_cpu", mutates_args=(), device_types="spyre")
+def to_dtype_cpu(input: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    warn_fallback(f"conversion from {input.dtype} to {dtype}")
+    return input.cpu().to(dtype=dtype).to(input.device)
+
+
+@to_dtype_cpu.register_fake
+def _(input: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    return torch.empty_like(input, dtype=dtype)
