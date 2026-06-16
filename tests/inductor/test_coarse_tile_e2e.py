@@ -1027,7 +1027,6 @@ class TestCoarseTileReductionE2E(InductorTestCase):
         self.assertIn("LoopSpec(", src, "Expected LoopSpec for K-tiled matmul")
         self.assertIn("sympify('4')", src, "Expected loop count 4")
 
-    @config.patch({"lx_planning": False})
     def test_hint_tiled_reduction_matmul_correct(self):
         """torch.matmul tiled over K (4 tiles) produces correct results."""
         from torch_spyre._inductor import spyre_hint
@@ -1201,7 +1200,6 @@ class TestCoarseTileMatmulKTilingE2E(InductorTestCase):
         super().setUp()
         torch.manual_seed(0xAFFE)
 
-    @config.patch({"lx_planning": False})
     def test_mm_k_tiled_correct(self):
         """2D mm [M,K] @ [K,N] tiled over K produces correct results."""
         from torch_spyre._inductor import spyre_hint
@@ -1223,7 +1221,6 @@ class TestCoarseTileMatmulKTilingE2E(InductorTestCase):
             fn, a, b, run_compile=True, run_eager=False, atol=0.05, rtol=0.05
         )
 
-    @config.patch({"lx_planning": False})
     def test_bmm_k_tiled_correct(self):
         """3D bmm [B,M,K] @ [B,K,N] tiled over K produces correct results."""
         from torch_spyre._inductor import spyre_hint
@@ -1246,7 +1243,6 @@ class TestCoarseTileMatmulKTilingE2E(InductorTestCase):
             fn, a, b, run_compile=True, run_eager=False, atol=0.05, rtol=0.05
         )
 
-    @config.patch({"lx_planning": False})
     def test_bmm_3d2d_k_tiled_correct(self):
         """3D×2D matmul [B,M,K] @ [K,N] tiled over K produces correct results."""
         from torch_spyre._inductor import spyre_hint
@@ -1269,7 +1265,6 @@ class TestCoarseTileMatmulKTilingE2E(InductorTestCase):
             fn, a, b, run_compile=True, run_eager=False, atol=0.05, rtol=0.05
         )
 
-    @config.patch({"lx_planning": False})
     def test_mm_k_tiled_loopspec(self):
         """K-tiled mm produces a LoopSpec with count 4 in generated source."""
         from torch_spyre._inductor import spyre_hint
@@ -1316,7 +1311,6 @@ class TestCoarseTileNestedReductionE2E(InductorTestCase):
         super().setUp()
         torch.manual_seed(0xCAFE)
 
-    @config.patch({"lx_planning": False})
     def test_nested_bmm_outer_Batch_inner_K_correct(self):
         """bmm [B,M,K]@[B,K,N] outer B (output) + inner K (reduction) — correct."""
         from torch_spyre._inductor import spyre_hint
@@ -1340,7 +1334,6 @@ class TestCoarseTileNestedReductionE2E(InductorTestCase):
             fn, a, b, run_compile=True, run_eager=False, atol=0.05, rtol=0.05
         )
 
-    @config.patch({"lx_planning": False})
     def test_nested_matmul_outer_M_inner_K_correct(self):
         """mm [M,K]@[K,N] with outer M (output) + inner K (reduction) — correct."""
         from torch_spyre._inductor import spyre_hint
@@ -1363,7 +1356,6 @@ class TestCoarseTileNestedReductionE2E(InductorTestCase):
             fn, a, b, run_compile=True, run_eager=False, atol=0.05, rtol=0.05
         )
 
-    @config.patch({"lx_planning": False})
     def test_nested_matmul_outer_M_inner_K_loopspec(self):
         """Nested mm produces two LoopSpec levels (outer count 2, inner count 4)."""
         from torch_spyre._inductor import spyre_hint
