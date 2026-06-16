@@ -142,7 +142,7 @@ jobs:
           - name: Test Fallbacks
             config: torch_spyre_tests/test_fallbacks_config.yaml
           - name: Test logging patterns
-            config: torch_spyre_tests/test_logging_patterns.yaml
+            config: torch_spyre_tests/test_logging_patterns_config.yaml
           - name: Test Modules
             config: torch_spyre_tests/test_modules_config.yaml
           - name: Test Regex
