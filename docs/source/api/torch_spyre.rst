@@ -598,6 +598,15 @@ Environment Variables
      - Fully unroll ``LoopSpec`` nodes into flat ``OpSpec``\s before bundle
        generation (default ``1``; set ``0`` to keep the
        ``scf.for`` / ``affine.apply`` path)
+   * - ``LX_BOUNDARY_CLONES``
+     - Insert boundary clones at LX scratchpad planning edges (default
+       ``0``)
+   * - ``MAX_BUCKETS``
+     - Maximum number of work division buckets (default ``32``)
+   * - ``MIN_DEFAULT_GRANULARITY``
+     - Minimum default granularity for work division (default ``4``)
+   * - ``SPYRE_INDUCTOR_IGNORE_HINTS``
+     - Ignore ``spyre_hint(work_div={...})`` annotations (default ``0``)
 
 **Device enumeration** (``torch_spyre/csrc/spyre_device_enum.cpp``):
 
