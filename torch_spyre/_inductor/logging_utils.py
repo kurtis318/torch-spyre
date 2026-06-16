@@ -65,9 +65,7 @@ def get_logger(name: str) -> logging.Logger:
         _reinitialize()
 
     if full_name in _loggers:
-        logger = _loggers[full_name]
-        logger.setLevel(int(logging_config.get_log_level(full_name)))
-        return logger
+        return _loggers[full_name]
 
     logger = logging.getLogger(full_name)
     logger.setLevel(int(logging_config.get_log_level(full_name)))
@@ -113,7 +111,7 @@ def is_inductor_logging_enabled() -> bool:
     Returns:
         True if SPYRE_INDUCTOR_LOG is set to a truthy value, False otherwise
     """
-    if _needs_reinit or _INDUCTOR_LOGGING_ENABLED is None:
+    if _needs_reinit:
         _reinitialize()
     return _INDUCTOR_LOGGING_ENABLED
 
