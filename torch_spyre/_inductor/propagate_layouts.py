@@ -577,32 +577,6 @@ def _layernormnorm_layout(
     return [out_stl]
 
 
-def _index_symbols(dep: MemoryDep) -> set[sympy.Symbol]:
-    return dep.index.free_symbols
-
-
-def _find_reduction_var(x_dep, out_dep, op_name: str = "reduction") -> sympy.Symbol:
-    """Reduction loop variable: appears in x's index but not in output's index."""
-    reduction_vars = _index_symbols(x_dep) - _index_symbols(out_dep)
-    if len(reduction_vars) != 1:
-        raise Unsupported(
-            f"{op_name}: expected 1 reduction variable, got {reduction_vars}"
-        )
-    return next(iter(reduction_vars))
-
-
-def _find_matmul_generated_var(y_dep, x_dep, out_dep) -> sympy.Symbol:
-    """N loop variable: appears in y's and output's index but not in x's index."""
-    generated_vars = (_index_symbols(y_dep) & _index_symbols(out_dep)) - _index_symbols(
-        x_dep
-    )
-    if len(generated_vars) != 1:
-        raise Unsupported(
-            f"matmul: expected 1 generated variable, got {generated_vars}"
-        )
-    return next(iter(generated_vars))
-
-
 def _dev_coord_for_var(dev_coords, arg_host_coords, var):
     """Return the first device coord that carries var and is resolvable via matching_dim."""
     for c in dev_coords:
