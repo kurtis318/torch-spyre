@@ -58,8 +58,8 @@ void JobPlanStepD2H::write(std::ostream& os) const {
      << "\n";
 }
 
-std::unique_ptr<flex::RuntimeOperation> JobPlanStepCompute::construct(
-    LaunchContext& ctx) const {
+void JobPlanStepCompute::construct(LaunchContext& ctx,
+                                   flex::RuntimeStream* flex_stream) const {
   std::vector<const flex::CompositeAddress*> tensor_allocs;
   if (bind_io_addresses_) {
     for (auto& tensor : ctx.inputs_outputs) {
@@ -71,10 +71,10 @@ std::unique_ptr<flex::RuntimeOperation> JobPlanStepCompute::construct(
       tensor_allocs.push_back(address);
     }
   }
-  auto op = std::make_unique<flex::RuntimeOperationCompute>(
-      &binary_address_, tensor_allocs, "", bootstrap_addr_);
-  op->setPipelineBarrier(pipeline_barrier_);
-  return op;
+  flex::ComputeParams params(&binary_address_, std::move(tensor_allocs), "",
+                             bootstrap_addr_);
+  params.pipeline_barrier = pipeline_barrier_;
+  flex_stream->launchOperationCompute(&params);
 }
 
 void JobPlanStepCompute::write(std::ostream& os) const {
