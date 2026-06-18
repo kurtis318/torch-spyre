@@ -273,7 +273,7 @@ std::unique_ptr<JobPlanStep> JobPlanBuilder::translateComputeOnDevice(
   uint64_t job_bin_ptr = std::stoull(job_bin_ptr_str);
 
   auto job_bin_addr =
-      compute_offset_address(job_allocation_.value(), job_bin_ptr);
+      compute_offset_address(job_allocation_.at(0), job_bin_ptr);
 
   // Verify the resulting binary address is populated
   TORCH_CHECK(job_bin_addr.total_size() > 0,
