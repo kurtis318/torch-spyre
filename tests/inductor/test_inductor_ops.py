@@ -5549,6 +5549,53 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             run_eager=False,
         )
 
+    def test_round_trip_to_dtype_implicit_cpu(self, op, x, dst_dtype):
+        y = x.clone()
+
+        def fn(op, x, y, dst_dtype):
+            x_dst = x.to(dst_dtype)
+            z = op(x_dst, y)
+            return z.to(x.dtype)
+
+        self.compare_with_cpu(
+            fn,
+            op,
+            x,
+            y,
+            dst_dtype,
+            cpu_compile=False,
+            run_eager=False,
+        )
+
+    def test_round_trip_to_dtype_implicit_invalid_cpu(self, op, x, dst_dtype):
+        y = x.clone()
+        x_dst = x.to(dst_dtype)
+
+        def fn(op, x, y):
+            src_dtype = y.dtype
+            z = op(x, y)
+            return z.to(src_dtype)
+
+        with pytest.raises(Exception) as exc_info:
+            self.compare_with_cpu(
+                fn,
+                op,
+                x_dst,
+                y,
+                cpu_compile=False,
+                run_eager=False,
+            )
+
+        assert "All inputs to an op must have same element arrangement" in str(
+            exc_info.value
+        )
+
+    def test_add_constant_cpu(self, op, x):
+        def fn(op, x):
+            return op(x, 1.0)
+
+        self.compare_with_cpu(fn, op, x, cpu_compile=False, run_eager=False)
+
     def test_bool_conversion_from_spyre(self):
         torch.manual_seed(42)
 
