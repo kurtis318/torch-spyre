@@ -156,12 +156,14 @@ def _parse_legacy_vars() -> Dict[str, LogLevel]:
 
     if os.environ.get("TORCH_SPYRE_DEBUG") == "1":
         warnings.warn(
-            "TORCH_SPYRE_DEBUG is deprecated. Use TORCH_LOGS='spyre.runtime:DEBUG' instead.",
+            "TORCH_SPYRE_DEBUG is deprecated. Use TORCH_LOGS='spyre:DEBUG' instead.",
             DeprecationWarning,
             stacklevel=3,
         )
-        config["spyre.runtime"] = LogLevel.DEBUG
-        _config_source["spyre.runtime"] = "legacy:TORCH_SPYRE_DEBUG"
+        for component in DEFAULT_LOG_LEVELS:
+            if component not in config:
+                config[component] = LogLevel.DEBUG
+                _config_source[component] = "legacy:TORCH_SPYRE_DEBUG"
 
     legacy_log_file = os.environ.get("SPYRE_LOG_FILE")
     if legacy_log_file:
@@ -215,6 +217,9 @@ def configure_python_logging():
     This is idempotent and safe to call multiple times.
     """
     global _python_logging_configured
+
+    if _python_logging_configured:
+        return
 
     if not _initialized:
         initialize()
@@ -271,7 +276,6 @@ def initialize():
         _config = _resolve_config()
         _initialized = True
 
-    _sync_to_cpp()
     configure_python_logging()
 
 
@@ -353,7 +357,7 @@ def get_log_file() -> Optional[str]:
 
 def set_log_file(path: Optional[str]):
     """Set the log file path programmatically."""
-    global _log_file_path, _log_file_source
+    global _log_file_path, _log_file_source, _python_logging_configured
 
     if not _initialized:
         initialize()
@@ -361,6 +365,7 @@ def set_log_file(path: Optional[str]):
     with _get_lock():
         _log_file_path = path
         _log_file_source = "programmatic" if path else "default"
+        _python_logging_configured = False
         configure_python_logging()
 
 
@@ -423,34 +428,4 @@ def get_config_for_cpp() -> List[Tuple[str, int]]:
     return [(comp, int(level)) for comp, level in _config.items()]
 
 
-def _sync_to_cpp():
-    """Synchronize Python configuration to C++."""
-    try:
-        from torch_spyre._C import _logging
-
-        config = get_config_for_cpp()
-        _logging.LoggingConfig.instance().initialize_from_python(config)
-    except ImportError:
-        pass
-
-
-def reset():
-    """Reset logging configuration for re-initialization.
-
-    Thread-safe. Intended for use in tests that need to pick up new
-    environment variable values.
-    """
-    global _config, _initialized, _python_logging_configured
-
-    with _get_lock():
-        _config.clear()
-        _config_source.clear()
-        _initialized = False
-        _python_logging_configured = False
-
-
 initialize()
-
-from torch_spyre._compat.logging import emit_migration_warning  # noqa: E402
-
-emit_migration_warning()
