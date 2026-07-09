@@ -394,7 +394,7 @@ class CustomPreSchedulingPasses:
             pass_fn(graph)
 
             pass_name = _get_pass_name(pass_fn)
-            if _should_log_pass(pass_name):
+            if logger.isEnabledFor(logging.DEBUG) and _should_log_pass(pass_name):
                 logger.debug(
                     "AFTER %s\n%s", pass_name, _format_operations(graph.operations)
                 )
