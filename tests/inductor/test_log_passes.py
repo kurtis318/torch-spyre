@@ -16,6 +16,7 @@
 """Tests for per-pass operation logging in CustomPreSchedulingPasses."""
 
 import os
+import functools
 from unittest.mock import patch
 
 import torch  # noqa: F401
@@ -55,8 +56,6 @@ class TestGetPassName:
         assert _get_pass_name(obj) == "MyCallablePass"
 
     def test_decorated_function_preserves_name(self):
-        import functools
-
         def decorator(fn):
             @functools.wraps(fn)
             def wrapper(*args, **kwargs):
