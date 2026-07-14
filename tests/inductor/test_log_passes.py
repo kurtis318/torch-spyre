@@ -15,9 +15,10 @@
 
 """Tests for per-pass operation logging in CustomPreSchedulingPasses."""
 
+import logging
 import os
 import functools
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import torch  # noqa: F401
 
@@ -28,17 +29,15 @@ from torch_spyre._inductor.passes import _get_pass_name, _should_log_pass
 class TestGetPassName:
     """Tests for _get_pass_name helper."""
 
-    def test_regular_function(self):
+    def test_various_callable_types(self):
         def my_pass(graph):
             pass
 
         assert _get_pass_name(my_pass) == "my_pass"
 
-    def test_lambda(self):
         fn = lambda graph: None  # noqa: E731
         assert _get_pass_name(fn) == "<lambda>"
 
-    def test_bound_method(self):
         class MyPass:
             def run(self, graph):
                 pass
@@ -46,14 +45,12 @@ class TestGetPassName:
         obj = MyPass()
         assert _get_pass_name(obj.run) == "run"
 
-    def test_callable_object(self):
         class MyCallablePass:
             def __call__(self, graph):
                 pass
 
-        obj = MyCallablePass()
-        # callable objects without __name__ or __func__ fall back to class name
-        assert _get_pass_name(obj) == "MyCallablePass"
+        callable_obj = MyCallablePass()
+        assert _get_pass_name(callable_obj) == "MyCallablePass"
 
     def test_decorated_function_preserves_name(self):
         def decorator(fn):
@@ -73,36 +70,33 @@ class TestGetPassName:
 class TestShouldLogPass:
     """Tests for _should_log_pass helper."""
 
-    def test_empty_config_returns_false(self):
+    def test_disabled_when_empty(self):
         with config.patch({"log_passes": ""}):
             assert _should_log_pass("split_multi_ops") is False
 
-    def test_all_returns_true(self):
+    def test_all_and_one_enable_everything(self):
         with config.patch({"log_passes": "all"}):
             assert _should_log_pass("split_multi_ops") is True
             assert _should_log_pass("insert_restickify") is True
 
-    def test_one_returns_true(self):
         with config.patch({"log_passes": "1"}):
             assert _should_log_pass("any_pass_name") is True
 
-    def test_single_name_match(self):
+    def test_selective_name_matching(self):
         with config.patch({"log_passes": "split_multi_ops"}):
             assert _should_log_pass("split_multi_ops") is True
             assert _should_log_pass("insert_restickify") is False
 
-    def test_comma_separated_list(self):
         with config.patch({"log_passes": "split_multi_ops,insert_restickify"}):
             assert _should_log_pass("split_multi_ops") is True
             assert _should_log_pass("insert_restickify") is True
             assert _should_log_pass("deadcode_elimination") is False
 
-    def test_comma_separated_with_spaces(self):
         with config.patch({"log_passes": " split_multi_ops , insert_restickify "}):
             assert _should_log_pass("split_multi_ops") is True
             assert _should_log_pass("insert_restickify") is True
 
-    def test_no_partial_match(self):
+        # No partial matching
         with config.patch({"log_passes": "split_multi"}):
             assert _should_log_pass("split_multi_ops") is False
 
@@ -110,18 +104,142 @@ class TestShouldLogPass:
 class TestLogPassesConfig:
     """Tests for the log_passes configuration knob."""
 
-    def test_default_is_empty(self):
+    def test_default_and_env_var(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("SPYRE_LOG_PASSES", None)
-            # config.log_passes reads from env at module load; verify the
-            # default when no env var is set.
             with config.patch({"log_passes": ""}):
                 assert config.log_passes == ""
 
-    def test_reads_from_env_var(self):
         with patch.dict(
             os.environ, {"SPYRE_LOG_PASSES": "split_multi_ops,deadcode_elimination"}
         ):
-            # Simulate fresh config read by patching to the env var value
             with config.patch({"log_passes": os.environ["SPYRE_LOG_PASSES"]}):
                 assert config.log_passes == "split_multi_ops,deadcode_elimination"
+
+
+def _make_spyre_graph():
+    """Create a minimal mock GraphLowering with a Spyre-device operation."""
+    op = MagicMock()
+    op.get_device.return_value = torch.device("spyre")
+    op.get_name.return_value = "buf0"
+    graph = MagicMock()
+    graph.operations = [op]
+    return graph
+
+
+class TestPerPassLoggingIntegration:
+    """Integration tests for per-pass logging in CustomPreSchedulingPasses."""
+
+    def test_logs_after_pass_when_enabled(self):
+        from torch_spyre._inductor.passes import CustomPreSchedulingPasses
+
+        graph = _make_spyre_graph()
+
+        def my_pass(g):
+            pass
+
+        passes_obj = CustomPreSchedulingPasses.__new__(CustomPreSchedulingPasses)
+        passes_obj.passes = [my_pass]
+
+        with config.patch({"log_passes": "all"}):
+            with patch("torch_spyre._inductor.passes.logger") as mock_logger:
+                mock_logger.isEnabledFor.return_value = True
+                passes_obj(graph)
+
+                debug_calls = [
+                    c
+                    for c in mock_logger.debug.call_args_list
+                    if len(c.args) >= 2
+                    and "AFTER" in c.args[0]
+                    and c.args[1] == "my_pass"
+                ]
+                assert len(debug_calls) == 1
+
+    def test_no_log_when_disabled(self):
+        from torch_spyre._inductor.passes import CustomPreSchedulingPasses
+
+        graph = _make_spyre_graph()
+
+        def my_pass(g):
+            pass
+
+        passes_obj = CustomPreSchedulingPasses.__new__(CustomPreSchedulingPasses)
+        passes_obj.passes = [my_pass]
+
+        # Config empty — no per-pass logging
+        with config.patch({"log_passes": ""}):
+            with patch("torch_spyre._inductor.passes.logger") as mock_logger:
+                mock_logger.isEnabledFor.return_value = True
+                passes_obj(graph)
+
+                debug_calls = [
+                    c
+                    for c in mock_logger.debug.call_args_list
+                    if len(c.args) >= 2
+                    and "AFTER" in c.args[0]
+                    and c.args[1] == "my_pass"
+                ]
+                assert len(debug_calls) == 0
+
+        # Logger level too high — DEBUG guard blocks output
+        with config.patch({"log_passes": "all"}):
+            with patch("torch_spyre._inductor.passes.logger") as mock_logger:
+                mock_logger.isEnabledFor.side_effect = (
+                    lambda level: level != logging.DEBUG
+                )
+                passes_obj(graph)
+
+                debug_calls = [
+                    c
+                    for c in mock_logger.debug.call_args_list
+                    if len(c.args) >= 2
+                    and "AFTER" in c.args[0]
+                    and c.args[1] == "my_pass"
+                ]
+                assert len(debug_calls) == 0
+
+    def test_selective_pass_logging(self):
+        from torch_spyre._inductor.passes import CustomPreSchedulingPasses
+
+        graph = _make_spyre_graph()
+
+        def pass_a(g):
+            pass
+
+        def pass_b(g):
+            pass
+
+        passes_obj = CustomPreSchedulingPasses.__new__(CustomPreSchedulingPasses)
+        passes_obj.passes = [pass_a, pass_b]
+
+        with config.patch({"log_passes": "pass_b"}):
+            with patch("torch_spyre._inductor.passes.logger") as mock_logger:
+                mock_logger.isEnabledFor.return_value = True
+                passes_obj(graph)
+
+                debug_calls = mock_logger.debug.call_args_list
+                after_calls = [
+                    c for c in debug_calls if len(c.args) >= 2 and "AFTER" in c.args[0]
+                ]
+                assert any(c.args[1] == "pass_b" for c in after_calls)
+                assert not any(c.args[1] == "pass_a" for c in after_calls)
+
+    def test_early_return_when_no_spyre_device(self):
+        from torch_spyre._inductor.passes import CustomPreSchedulingPasses
+
+        op = MagicMock()
+        op.get_device.return_value = torch.device("cpu")
+        graph = MagicMock()
+        graph.operations = [op]
+
+        def my_pass(g):
+            raise AssertionError("pass should not be called")
+
+        passes_obj = CustomPreSchedulingPasses.__new__(CustomPreSchedulingPasses)
+        passes_obj.passes = [my_pass]
+
+        with config.patch({"log_passes": "all"}):
+            with patch("torch_spyre._inductor.passes.logger") as mock_logger:
+                mock_logger.isEnabledFor.return_value = True
+                passes_obj(graph)
+                assert mock_logger.debug.call_count == 0
