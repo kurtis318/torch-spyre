@@ -107,6 +107,8 @@ class TestLogPassesConfig:
     """Tests for the log_passes configuration knob."""
 
     def test_default_when_env_unset(self):
+        env = {k: v for k, v in os.environ.items() if k != "SPYRE_LOG_PASSES"}
+        env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
         result = subprocess.run(
             [
                 sys.executable,
@@ -115,7 +117,7 @@ class TestLogPassesConfig:
             ],
             capture_output=True,
             text=True,
-            env={k: v for k, v in os.environ.items() if k != "SPYRE_LOG_PASSES"},
+            env=env,
         )
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == ""
@@ -132,6 +134,7 @@ class TestLogPassesConfig:
             env={
                 **os.environ,
                 "SPYRE_LOG_PASSES": "split_multi_ops,deadcode_elimination",
+                "TORCH_DEVICE_BACKEND_AUTOLOAD": "0",
             },
         )
         assert result.returncode == 0, result.stderr
