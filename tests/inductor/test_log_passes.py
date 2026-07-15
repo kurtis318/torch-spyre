@@ -18,6 +18,8 @@
 import logging
 import os
 import functools
+import subprocess
+import sys
 from unittest.mock import MagicMock, patch
 
 import torch  # noqa: F401
@@ -104,17 +106,36 @@ class TestShouldLogPass:
 class TestLogPassesConfig:
     """Tests for the log_passes configuration knob."""
 
-    def test_default_and_env_var(self):
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("SPYRE_LOG_PASSES", None)
-            with config.patch({"log_passes": ""}):
-                assert config.log_passes == ""
+    def test_default_when_env_unset(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from torch_spyre._inductor import config; print(config.log_passes)",
+            ],
+            capture_output=True,
+            text=True,
+            env={k: v for k, v in os.environ.items() if k != "SPYRE_LOG_PASSES"},
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == ""
 
-        with patch.dict(
-            os.environ, {"SPYRE_LOG_PASSES": "split_multi_ops,deadcode_elimination"}
-        ):
-            with config.patch({"log_passes": os.environ["SPYRE_LOG_PASSES"]}):
-                assert config.log_passes == "split_multi_ops,deadcode_elimination"
+    def test_env_var_populates_config(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from torch_spyre._inductor import config; print(config.log_passes)",
+            ],
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "SPYRE_LOG_PASSES": "split_multi_ops,deadcode_elimination",
+            },
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "split_multi_ops,deadcode_elimination"
 
 
 def _make_spyre_graph():
