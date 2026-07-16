@@ -24,6 +24,7 @@ from torch_spyre._inductor.codegen.compute_ops import SymbolKind
 from torch_spyre._inductor.codegen.superdsc import compile_op_spec
 from torch_spyre._inductor.codegen.unroll import unroll_loop_specs
 from torch_spyre._inductor.op_spec import LoopSpec, OpSpec
+from torch_spyre._inductor.op_spec_validation import validate_op_specs
 from torch_spyre._inductor.logging_utils import get_inductor_logger
 
 
@@ -87,6 +88,9 @@ def generate_bundle(
         unroll_loops = _spyre_config.unroll_loops
 
     specs_list: list = unroll_loop_specs(list(specs)) if unroll_loops else list(specs)
+
+    if _spyre_config.validate_op_specs:
+        validate_op_specs(specs_list, stage="after_unrolling")
 
     # -----------------------------------------------------------------------
     # Pass 1: compile all OpSpecs depth-first.

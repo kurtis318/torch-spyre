@@ -109,4 +109,8 @@ layout_solver: Literal["greedy", "bestfit", "firstfit", "cpsat"] = os.environ.ge
     "LAYOUT_SOLVER", "greedy"
 )  # type: ignore[assignment]
 
+# Enable OpSpec validation at pipeline stage boundaries. Adds overhead but
+# catches invariant violations early. Set SPYRE_VALIDATE_OP_SPECS=1 to enable.
+validate_op_specs: bool = os.environ.get("SPYRE_VALIDATE_OP_SPECS", "0") == "1"
+
 install_config_module(sys.modules[__name__])
