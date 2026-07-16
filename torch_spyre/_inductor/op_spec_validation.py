@@ -90,6 +90,23 @@ DTYPE_OPS = frozenset(
 
 SPECIAL_OPS = frozenset({"ReStickifyOpHBM"})
 
+BINARY_OPS = frozenset(
+    {
+        "add",
+        "sub",
+        "mul",
+        "realdiv",
+        "maximum",
+        "minimum",
+        "equal",
+        "notequal",
+        "greaterthan",
+        "greaterequal",
+        "lesserthan",
+        "lesserequal",
+    }
+)
+
 ALL_KNOWN_OPS = MATMUL_OPS | REDUCTION_OPS | POINTWISE_OPS | DTYPE_OPS | SPECIAL_OPS
 
 
@@ -106,6 +123,21 @@ class OpSpecValidationError(ValueError):
         super().__init__(msg)
         self.op_spec = op_spec
         self.invariant = invariant
+
+
+def _is_unimplemented_op(item: object) -> bool:
+    """Duck-type check for UnimplementedOp variants.
+
+    spyre_kernel.py defines a local UnimplementedOp(RValue) that also appears
+    in op_spec lists. Importing it here would create a circular dependency, so
+    we detect it structurally: has an ``op`` attribute and is named
+    "UnimplementedOp".
+    """
+    return (
+        type(item).__name__ == "UnimplementedOp"
+        and hasattr(item, "op")
+        and isinstance(item.op, str)
+    )
 
 
 def validate_op_specs(
@@ -130,6 +162,8 @@ def validate_op_specs(
         elif isinstance(item, OpSpec):
             _validate_op_spec(item, stage, loop_depth)
         elif isinstance(item, UnimplementedOp):
+            pass
+        elif _is_unimplemented_op(item):
             pass
         else:
             raise OpSpecValidationError(
@@ -458,23 +492,7 @@ def _check_op_specific_constraints(op_spec: OpSpec, stage: str) -> None:
             stage,
         )
 
-    binary_ops = frozenset(
-        {
-            "add",
-            "sub",
-            "mul",
-            "realdiv",
-            "maximum",
-            "minimum",
-            "equal",
-            "notequal",
-            "greaterthan",
-            "greaterequal",
-            "lesserthan",
-            "lesserequal",
-        }
-    )
-    if op in binary_ops and n_inputs < 2:
+    if op in BINARY_OPS and n_inputs < 2:
         raise OpSpecValidationError(
             op_spec,
             f"binary op {op!r} requires at least 2 input TensorArgs",
