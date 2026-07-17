@@ -129,8 +129,7 @@ LogLevel LoggingConfig::resolve_log_level(const std::string& component) const {
       break;
     }
     sv = sv.substr(0, pos);
-    std::string key(sv);
-    it = config_.find(key);
+    it = config_.find(sv);  // transparent lookup, no allocation
     if (it != config_.end()) {
       return it->second;
     }
