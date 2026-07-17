@@ -302,14 +302,11 @@ def initialize():
 
 def _sync_cpp_config():
     """Push current Python config to the C++ LoggingConfig singleton."""
-    try:
-        from torch_spyre._C import _logging as cpp_logging
+    from torch_spyre._C import _logging as cpp_logging
 
-        config = cpp_logging.LoggingConfig.instance()
-        config.initialize_from_python(get_config_for_cpp())
-        config.set_log_file(_log_file_path or "")
-    except (ImportError, AttributeError):
-        pass
+    config = cpp_logging.LoggingConfig.instance()
+    config.initialize_from_python(get_config_for_cpp())
+    config.set_log_file(_log_file_path or "")
 
 
 def reset():
