@@ -89,23 +89,19 @@ core_id_k_fast_emission: bool = (
 # into the SDSC JSON and bundle.mlir emits sdsc_execute with no operands.
 bundle_symbolic_args: bool = os.environ.get("BUNDLE_SYMBOLIC_ARGS", "1") == "1"
 
-# When True, LoopSpec nodes are fully unrolled into flat OpSpecs before
-# generate_bundle runs.  When False (default), LoopSpecs are passed through
-# intact for the scf.for / affine.apply path.
-unroll_loops: bool = os.environ.get("UNROLL_LOOPS", "0") == "1"
-
 # Layout solver class used by default in scratchpad.allocator.ScratchpadAllocator.
 # Options:
-#  "greedy":   GreedyLayoutSolver (default),
-#  "bestfit":  BestFitLayoutSolver,
-#  "firstfit": FirstFitLayoutSolver,
+#  "greedy":       GreedyLayoutSolver (default),
+#  "bestfit":      BestFitLayoutSolver,
+#  "firstfit":     FirstFitLayoutSolver,
+#  "simulated_annealing":  SimulatedAnnealingLayoutSolver,
 #  "cpsat":    CpSatLayoutSolver (OR-Tools CP-SAT joint core-division +
 #              LX placement, minimizing HBM transfer traffic).
 
 # TODO(isuruf): Change to firstfit when deeptools PR4298 lands
-layout_solver: Literal["greedy", "bestfit", "firstfit", "cpsat"] = os.environ.get(
-    "LAYOUT_SOLVER", "greedy"
-)  # type: ignore[assignment]
+layout_solver: Literal[
+    "greedy", "bestfit", "firstfit", "cpsat", "simulated_annealing"
+] = os.environ.get("LAYOUT_SOLVER", "greedy")  # type: ignore[assignment]
 
 # Enable OpSpec validation at pipeline stage boundaries. Adds overhead but
 # catches invariant violations early. Set SPYRE_VALIDATE_OP_SPECS=1 to enable.
