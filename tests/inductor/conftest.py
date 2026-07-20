@@ -14,9 +14,9 @@
 
 """Inductor test suite conftest — enables OpSpec validation for all tests."""
 
-from torch_spyre._inductor import config
+import os
 
 
 def pytest_configure(config_obj):
     """Enable OpSpec validation for the inductor test suite."""
-    config.validate_op_specs = True
+    os.environ["SPYRE_VALIDATE_OP_SPECS"] = "1"
