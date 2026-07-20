@@ -256,6 +256,8 @@ class TestBundleLogging:
     """Tests for logger.info call in generate_bundle."""
 
     def test_logs_bundle_generation_label(self):
+        from torch_spyre._inductor.codegen.bundle import generate_bundle
+
         logger = logging.getLogger("spyre.inductor.sdsc_compile")
         with patch.object(logger, "isEnabledFor", return_value=True):
             with patch.object(logger, "info") as mock_info:
@@ -274,10 +276,6 @@ class TestBundleLogging:
                     ),
                     patch("builtins.open", MagicMock()),
                 ):
-                    from torch_spyre._inductor.codegen.bundle import (
-                        generate_bundle,
-                    )
-
                     op = _make_add_op()
                     generate_bundle(
                         kernel_name="test_kernel",

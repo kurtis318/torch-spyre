@@ -214,15 +214,28 @@ def find_unimplemented(specs: list) -> UnimplementedOp | None:
 
 
 def format_op_spec_list(specs: list, indent: int = 0) -> str:
-    """Format an op spec list for structured logging output."""
-    lines = []
-    prefix = "  " * indent
-    for item in specs:
+    """Format an op spec list for structured logging output.
+
+    Uses an explicit stack to avoid recursion-depth issues with deeply
+    nested LoopSpecs.
+    """
+    lines: list[str] = []
+    stack: list[tuple[list, int, int]] = [(specs, indent, 0)]
+    while stack:
+        current_specs, cur_indent, idx = stack.pop()
+        if idx >= len(current_specs):
+            continue
+        # Push remainder back for later processing.
+        stack.append((current_specs, cur_indent, idx + 1))
+        item = current_specs[idx]
+        prefix = "  " * cur_indent
         if isinstance(item, LoopSpec):
             lines.append(f"{prefix}LoopSpec(count={item.count})")
             lines.append(f"{prefix}  body=[")
-            lines.append(format_op_spec_list(item.body, indent + 2))
-            lines.append(f"{prefix}  ]")
+            # Push a sentinel to close the body bracket after children.
+            stack.append(([_LoopClose(prefix)], cur_indent, 0))
+            # Push the body for processing at deeper indent.
+            stack.append((item.body, cur_indent + 2, 0))
         elif isinstance(item, OpSpec):
             it_space_str = ", ".join(
                 f"{k}: ({v[0]}, {v[1]})" for k, v in item.iteration_space.items()
@@ -249,6 +262,17 @@ def format_op_spec_list(specs: list, indent: int = 0) -> str:
                 )
         elif isinstance(item, UnimplementedOp):
             lines.append(f"{prefix}UnimplementedOp(op={item.op!r})")
+        elif isinstance(item, _LoopClose):
+            lines.append(f"{item.prefix}  ]")
         else:
             lines.append(f"{prefix}{item!r}")
     return "\n".join(lines)
+
+
+class _LoopClose:
+    """Sentinel used by format_op_spec_list to emit closing brackets."""
+
+    __slots__ = ("prefix",)
+
+    def __init__(self, prefix: str):
+        self.prefix = prefix
