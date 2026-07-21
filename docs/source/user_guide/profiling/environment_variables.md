@@ -11,10 +11,10 @@ Debug-oriented variables (`TORCH_SPYRE_DEBUG`, `TORCH_COMPILE_DEBUG`,
 
 | Variable | Effect |
 |---|---|
-| `SPYRE_INDUCTOR_LOG=1` | *Deprecated*. Use `TORCH_LOGS="spyre.inductor:INFO"`. Enables Spyre-specific Inductor logging |
-| `SPYRE_INDUCTOR_LOG_LEVEL=DEBUG` | *Deprecated*. Set the level in `TORCH_LOGS` (e.g. `spyre.inductor:DEBUG`). Sets Spyre Inductor log verbosity |
+| `SPYRE_INDUCTOR_LOG=1` | *Deprecated*. Use `SPYRE_LOGS="spyre.inductor:INFO"`. Enables Spyre-specific Inductor logging |
+| `SPYRE_INDUCTOR_LOG_LEVEL=DEBUG` | *Deprecated*. Set the level in `SPYRE_LOGS` (e.g. `spyre.inductor:DEBUG`). Sets Spyre Inductor log verbosity |
 | `SPYRE_LOG_FILE=path/to/file.log` | *Deprecated*. Mapped to the top-level `spyre` logger file handler. Redirects Spyre Inductor log output to a file |
-| `TORCH_LOGS="spyre.inductor:DEBUG"` | Preferred logging control. Accepts `spyre.*` namespaces (`spyre`, `spyre.inductor`, `spyre.inductor.codegen`, and so on) |
+| `SPYRE_LOGS="spyre.inductor:DEBUG"` | Preferred logging control. Accepts `spyre.*` namespaces (`spyre`, `spyre.inductor`, `spyre.inductor.codegen`, and so on) |
 | `TORCH_LOGS="+inductor"` | Verbose PyTorch Inductor logging |
 | `TORCH_SPYRE_DOWNCAST_WARN=0` | Suppress `int64 → int32` downcast warnings |
 

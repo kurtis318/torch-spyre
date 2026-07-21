@@ -232,17 +232,8 @@ class LoggingIsolationMixin:
         if not file_path.is_file():
             pytest.skip(f"Invalid torch_spyre package root: {PACKAGE_ROOT}")
 
-        # Load logging_config first — it does NOT import torch, so TORCH_LOGS
-        # can safely remain in the environment for _parse_torch_logs() to read
-        # during initialize() (called at module load time).
+        # Load logging_config — reads SPYRE_LOGS, no conflict with torch
         logging_config = self._load_module("logging_config", "logging_config.py")
-
-        # NOW save and clear TORCH_LOGS before loading modules that import
-        # torch, since PyTorch's logging system rejects unregistered spyre.*
-        # namespaces.
-        saved_torch_logs = os.environ.get("TORCH_LOGS")
-        if saved_torch_logs and "spyre" in saved_torch_logs:
-            os.environ.pop("TORCH_LOGS", None)
 
         inductor_package_name = "_inductor"
         inductor_package = sys.modules.get(inductor_package_name)
@@ -261,15 +252,12 @@ class LoggingIsolationMixin:
         if ts_mod and hasattr(ts_mod, "logging_config"):
             delattr(ts_mod, "logging_config")
 
-        # logging_utils imports torch_spyre which triggers torch import
+        # Load logging_utils (imports torch) — SPYRE_LOGS is invisible to
+        # PyTorch so no save/clear workaround is needed.
         logging_utils = self._load_module(
             "_inductor.logging_utils",
             "_inductor/logging_utils.py",
         )
-
-        # Restore TORCH_LOGS after torch has been imported
-        if saved_torch_logs:
-            os.environ["TORCH_LOGS"] = saved_torch_logs
 
         return logging_config, logging_utils
 
@@ -277,10 +265,9 @@ class LoggingIsolationMixin:
 class UnifiedLoggingPatternTests(LoggingIsolationMixin, unittest.TestCase):
     """Tests for the unified logging configuration flow."""
 
-    # Need to figure out why this one fails.
-    def test_unified_torch_logs_controls_new_patterns(self) -> None:
-        """Verify TORCH_LOGS enables the new unified warning patterns."""
-        os.environ["TORCH_LOGS"] = "spyre.inductor:DEBUG"
+    def test_unified_spyre_logs_controls_new_patterns(self) -> None:
+        """Verify SPYRE_LOGS enables the new unified warning patterns."""
+        os.environ["SPYRE_LOGS"] = "spyre.inductor:DEBUG"
         logging_config, logging_utils = self._reload_logging_modules()
 
         compile_logger = logging_utils.get_logger("sdsc_compile")
@@ -300,7 +287,7 @@ class UnifiedLoggingPatternTests(LoggingIsolationMixin, unittest.TestCase):
         )
         self.assertEqual(
             logging_config.get_config_source("spyre.inductor"),
-            "TORCH_LOGS",
+            "SPYRE_LOGS",
         )
 
         with self.assertLogs("spyre", level="DEBUG") as captured:
@@ -425,6 +412,31 @@ class LegacyCompatibilityTests(LoggingIsolationMixin, unittest.TestCase):
             any("SPYRE_LOG_FILE is deprecated" in message for message in messages)
         )
 
+    def test_torch_logs_spyre_entries_trigger_deprecation(self) -> None:
+        """Verify TORCH_LOGS with spyre.* entries still works but warns."""
+        os.environ.pop("SPYRE_LOGS", None)
+        os.environ["TORCH_LOGS"] = "spyre.inductor:DEBUG"
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            logging_config, logging_utils = self._reload_logging_modules()
+
+        messages = [str(w.message) for w in caught]
+        self.assertTrue(
+            any(
+                "TORCH_LOGS is deprecated" in m or "Use SPYRE_LOGS instead" in m
+                for m in messages
+            )
+        )
+        self.assertEqual(
+            logging_config.get_effective_config()["spyre.inductor"],
+            "DEBUG",
+        )
+        self.assertEqual(
+            logging_config.get_config_source("spyre.inductor"),
+            "legacy:TORCH_LOGS",
+        )
+
 
 class CompleteIntegrationTests(LoggingIsolationMixin, unittest.TestCase):
     """End-to-end tests for integrated logging configuration behavior."""
@@ -433,7 +445,7 @@ class CompleteIntegrationTests(LoggingIsolationMixin, unittest.TestCase):
         self,
     ) -> None:
         """Verify integration flow, convenience loggers, and file output."""
-        os.environ["TORCH_LOGS"] = "spyre.inductor:DEBUG"
+        os.environ["SPYRE_LOGS"] = "spyre.inductor:DEBUG"
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_path = os.path.join(tmpdir, "spyre.log")
