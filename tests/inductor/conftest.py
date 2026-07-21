@@ -17,6 +17,6 @@
 import os
 
 
-def pytest_configure(config_obj):
+def pytest_configure(config):
     """Enable OpSpec validation for the inductor test suite."""
     os.environ["SPYRE_VALIDATE_OP_SPECS"] = "1"
