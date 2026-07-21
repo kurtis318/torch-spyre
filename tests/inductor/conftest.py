@@ -12,7 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Inductor test suite conftest — enables OpSpec validation for all tests."""
+"""Inductor test suite conftest — enables OpSpec validation for all tests.
+
+This adds overhead to every compiled-path test but catches invariant violations
+early.  The cost is acceptable for CI; disable via SPYRE_VALIDATE_OP_SPECS=0 if
+profiling test-suite runtime.
+"""
 
 import os
 
