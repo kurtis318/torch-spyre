@@ -25,7 +25,6 @@ import importlib.machinery
 import importlib.util
 import logging
 import os
-import subprocess
 import sys
 import tempfile
 import types
@@ -552,9 +551,10 @@ def _run_subprocess_with_env(env_vars: dict[str, str], script: str) -> str:
 
     Returns stdout as a string.
     """
+    import subprocess
+
     env = os.environ.copy()
     env.update(env_vars)
-    # Remove any existing TORCH_SPYRE_DEBUG to avoid interference
     if "TORCH_SPYRE_DEBUG" not in env_vars:
         env.pop("TORCH_SPYRE_DEBUG", None)
 
@@ -573,7 +573,7 @@ def _run_subprocess_with_env(env_vars: dict[str, str], script: str) -> str:
     reason="torch_spyre C++ extension not built",
 )
 class TestCppLoggingSingleComponent(unittest.TestCase):
-    """C++ DEBUGINFO macro with a single component (TORCH_SPYRE_DEBUG)."""
+    """C++ DEBUGINFO macro controlled by the legacy TORCH_SPYRE_DEBUG env var."""
 
     def test_debuginfo_enabled_single(self) -> None:
         """DEBUGINFO produces output when TORCH_SPYRE_DEBUG=1."""
@@ -614,7 +614,7 @@ print("CLEAN_EXIT")
     reason="torch_spyre C++ extension not built",
 )
 class TestCppLoggingTwoComponents(unittest.TestCase):
-    """C++ DEBUGINFO + Python logging with two components."""
+    """C++ DEBUGINFO (legacy TORCH_SPYRE_DEBUG) combined with Python SPYRE_LOGS."""
 
     def test_cpp_and_python_debug_two_components(self) -> None:
         """Both C++ DEBUGINFO and Python debug logging active together."""
@@ -668,7 +668,7 @@ print("TWO_COMP_NO_CPP_EXIT")
     reason="torch_spyre C++ extension not built",
 )
 class TestCppLoggingThreeComponents(unittest.TestCase):
-    """C++ DEBUGINFO + Python logging with three components."""
+    """C++ DEBUGINFO (legacy TORCH_SPYRE_DEBUG) combined with Python SPYRE_LOGS on three components."""
 
     def test_cpp_and_python_debug_three_components(self) -> None:
         """C++ DEBUGINFO and Python DEBUG on three components simultaneously."""
