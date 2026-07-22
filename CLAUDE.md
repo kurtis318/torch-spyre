@@ -45,7 +45,7 @@ Test sub-suites:
 | `LX_PLANNING=1` | Enable LX scratchpad memory planning |
 | `LAYOUT_SOLVER` | LX layout solver: `greedy` (default), `firstfit`, `bestfit`, `cpsat` |
 | `SPYRE_LOGS="spyre.inductor:DEBUG"` | Spyre-specific hierarchical logging |
-| `TORCH_LOGS="+inductor"` | Verbose Inductor logging |
+| `TORCH_LOGS="+inductor"` | Verbose Inductor logging (spyre.* entries deprecated; use `SPYRE_LOGS`) |
 | `TORCH_COMPILE_DEBUG=1` | Dump Inductor debug artifacts |
 | `TORCH_SPYRE_DOWNCAST_WARN=0` | Suppress int64→int32 downcast warnings |
 
