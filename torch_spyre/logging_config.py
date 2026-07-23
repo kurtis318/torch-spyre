@@ -344,6 +344,26 @@ def initialize():
     configure_python_logging()
 
 
+def reset():
+    """Reset logging state and re-initialize from current environment variables.
+
+    Thread-safe. Intended for test isolation where environment variables
+    are modified between calls.
+    """
+    global _config, _config_source, _log_file_path, _log_file_source
+    global _initialized, _python_logging_configured
+
+    with _get_lock():
+        _config = {}
+        _config_source = {}
+        _log_file_path = None
+        _log_file_source = "default"
+        _initialized = False
+        _python_logging_configured = False
+
+    initialize()
+
+
 def get_log_level(component: str) -> LogLevel:
     """Get effective log level for a component.
 
