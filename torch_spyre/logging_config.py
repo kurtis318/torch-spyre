@@ -354,10 +354,10 @@ def _sync_cpp_config():
 
 
 def reset():
-    """Reset logging configuration and re-initialize from environment.
+    """Reset logging state and re-initialize from current environment variables.
 
-    This clears all state and re-reads environment variables. Intended for
-    testing scenarios where env vars are modified after initial import.
+    Thread-safe. Intended for test isolation where environment variables
+    are modified between calls.
     """
     global _config, _config_source, _log_file_path, _log_file_source
     global _initialized, _python_logging_configured
