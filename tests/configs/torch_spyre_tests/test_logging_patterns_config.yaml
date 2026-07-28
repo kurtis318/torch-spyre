@@ -5,11 +5,9 @@ test_suite_config:
       unlisted_test_mode: mandatory_success
     - path: ${TORCH_DEVICE_ROOT}/tests/test_logging_patterns.py
       unlisted_test_mode: mandatory_success
-<<<<<<< HEAD
     - path: ${TORCH_DEVICE_ROOT}/tests/test_spyre_logs.py
-=======
+      unlisted_test_mode: mandatory_success
     - path: ${TORCH_DEVICE_ROOT}/tests/test_legacy_cpp_logging.py
       unlisted_test_mode: mandatory_success
     - path: ${TORCH_DEVICE_ROOT}/tests/test_new_cpp_logging.py
->>>>>>> 82b7c66 (Support for new C++ logging (#2893))
       unlisted_test_mode: mandatory_success

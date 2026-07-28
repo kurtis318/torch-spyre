@@ -271,24 +271,6 @@ class LoggingIsolationMixin:
         # Load logging_config — reads SPYRE_LOGS, no conflict with torch
         logging_config = self._load_module("logging_config", "logging_config.py")
 
-<<<<<<< HEAD
-=======
-        # Also register as torch_spyre.logging_config so that
-        # `from torch_spyre import logging_config` inside logging_utils
-        # resolves to this same instance (not a stale or separate one).
-        sys.modules["torch_spyre.logging_config"] = logging_config
-        ts_mod = sys.modules.get("torch_spyre")
-        if ts_mod:
-            ts_mod.logging_config = logging_config  # type: ignore[attr-defined]
-
-        # NOW save and clear TORCH_LOGS before loading modules that import
-        # torch, since PyTorch's logging system rejects unregistered spyre.*
-        # namespaces.
-        saved_torch_logs = os.environ.get("TORCH_LOGS")
-        if saved_torch_logs and "spyre" in saved_torch_logs:
-            os.environ.pop("TORCH_LOGS", None)
-
->>>>>>> 82b7c66 (Support for new C++ logging (#2893))
         inductor_package_name = "_inductor"
         inductor_package = sys.modules.get(inductor_package_name)
         if inductor_package is None:
@@ -298,7 +280,6 @@ class LoggingIsolationMixin:
                 PACKAGE_ROOT / "_inductor",
             )
 
-<<<<<<< HEAD
         # Clean up stale torch_spyre.logging_config references that persist
         # as attributes on the torch_spyre package from prior test runs.
         if "torch_spyre.logging_config" in sys.modules:
@@ -309,9 +290,6 @@ class LoggingIsolationMixin:
 
         # Load logging_utils (imports torch) — SPYRE_LOGS is invisible to
         # PyTorch so no save/clear workaround is needed.
-=======
-        # logging_utils imports torch_spyre which triggers torch import
->>>>>>> 82b7c66 (Support for new C++ logging (#2893))
         logging_utils = self._load_module(
             "_inductor.logging_utils",
             "_inductor/logging_utils.py",
@@ -323,43 +301,18 @@ class LoggingIsolationMixin:
 class TestUnifiedLoggingPatterns(LoggingIsolationMixin):
     """Tests for the unified logging configuration flow."""
 
-<<<<<<< HEAD
     def test_unified_spyre_logs_controls_new_patterns(self) -> None:
         """Verify SPYRE_LOGS enables the new unified warning patterns."""
         os.environ["SPYRE_LOGS"] = "spyre.inductor:DEBUG"
-=======
-    def test_unified_torch_logs_controls_new_patterns(self) -> None:
-        """Verify TORCH_LOGS enables the new unified warning patterns."""
-        os.environ["TORCH_LOGS"] = "spyre.inductor:DEBUG"
->>>>>>> 82b7c66 (Support for new C++ logging (#2893))
         logging_config, logging_utils = self._reload_logging_modules()
 
         compile_logger = logging_utils.get_logger("sdsc_compile")
         wd_logger = logging_utils.get_logger("work_division")
 
-<<<<<<< HEAD
-        self.assertEqual(
-            compile_logger.name,
-            "spyre.inductor.sdsc_compile",
-        )
-        self.assertEqual(
-            compile_logger.level,
-            int(logging_config.LogLevel.DEBUG),
-        )
-        self.assertEqual(
-            wd_logger.level,
-            int(logging_config.LogLevel.DEBUG),
-        )
-        self.assertEqual(
-            logging_config.get_config_source("spyre.inductor"),
-            "SPYRE_LOGS",
-        )
-=======
         assert compile_logger.name == "spyre.inductor.sdsc_compile"
         assert compile_logger.level == int(logging_config.LogLevel.DEBUG)
         assert wd_logger.level == int(logging_config.LogLevel.DEBUG)
-        assert logging_config.get_config_source("spyre.inductor") == "TORCH_LOGS"
->>>>>>> 82b7c66 (Support for new C++ logging (#2893))
+        assert logging_config.get_config_source("spyre.inductor") == "SPYRE_LOGS"
 
         with capture_logs("spyre", level="DEBUG") as captured:
             compile_logger.warning(
@@ -472,20 +425,12 @@ class TestLegacyCompatibility(LoggingIsolationMixin):
             logging_config, logging_utils = self._reload_logging_modules()
 
         messages = [str(w.message) for w in caught]
-        self.assertTrue(
-            any(
-                "TORCH_LOGS is deprecated" in m or "Use SPYRE_LOGS instead" in m
-                for m in messages
-            )
+        assert any(
+            "TORCH_LOGS is deprecated" in m or "Use SPYRE_LOGS instead" in m
+            for m in messages
         )
-        self.assertEqual(
-            logging_config.get_effective_config()["spyre.inductor"],
-            "DEBUG",
-        )
-        self.assertEqual(
-            logging_config.get_config_source("spyre.inductor"),
-            "legacy:TORCH_LOGS",
-        )
+        assert logging_config.get_effective_config()["spyre.inductor"] == "DEBUG"
+        assert logging_config.get_config_source("spyre.inductor") == "legacy:TORCH_LOGS"
 
 
 class TestCompleteIntegration(LoggingIsolationMixin):
