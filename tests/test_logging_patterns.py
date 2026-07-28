@@ -277,10 +277,9 @@ class LoggingIsolationMixin:
         logging_config = self._load_module("logging_config", "logging_config.py")
 
         inductor_package_name = "_inductor"
-        inductor_package = sys.modules.get(inductor_package_name)
-        if inductor_package is None:
+        if sys.modules.get(inductor_package_name) is None:
             assert PACKAGE_ROOT is not None
-            inductor_package = self._ensure_package_module(
+            self._ensure_package_module(
                 inductor_package_name,
                 PACKAGE_ROOT / "_inductor",
             )
