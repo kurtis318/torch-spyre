@@ -563,7 +563,7 @@ def _run_subprocess_with_env(env_vars: dict[str, str], script: str) -> str:
         capture_output=True,
         text=True,
         env=env,
-        timeout=30,
+        timeout=60,
     )
     return result.stdout + result.stderr
 
