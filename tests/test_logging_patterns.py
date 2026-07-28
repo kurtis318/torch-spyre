@@ -422,20 +422,12 @@ class LegacyCompatibilityTests(LoggingIsolationMixin, unittest.TestCase):
             logging_config, logging_utils = self._reload_logging_modules()
 
         messages = [str(w.message) for w in caught]
-        self.assertTrue(
-            any(
-                "TORCH_LOGS is deprecated" in m or "Use SPYRE_LOGS instead" in m
-                for m in messages
-            )
+        assert any(
+            "TORCH_LOGS contains spyre.*" in m or "moved to SPYRE_LOGS" in m
+            for m in messages
         )
-        self.assertEqual(
-            logging_config.get_effective_config()["spyre.inductor"],
-            "DEBUG",
-        )
-        self.assertEqual(
-            logging_config.get_config_source("spyre.inductor"),
-            "legacy:TORCH_LOGS",
-        )
+        assert logging_config.get_effective_config()["spyre.inductor"] == "DEBUG"
+        assert logging_config.get_config_source("spyre.inductor") == "legacy:TORCH_LOGS"
 
 
 class CompleteIntegrationTests(LoggingIsolationMixin, unittest.TestCase):
