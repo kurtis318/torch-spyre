@@ -13,8 +13,9 @@
 # limitations under the License.
 
 
-"""Pytest/unittest-compatible logging tests for torch-spyre."""
+"""Pytest-compatible logging tests for torch-spyre."""
 
+import contextlib
 import importlib.machinery
 import importlib.util
 import logging
@@ -105,6 +106,42 @@ if PACKAGE_ROOT is not None:
         sys.path.insert(0, str(BASE_DIR))
 
 
+class _CapturedLogs:
+    """Container for captured log records."""
+
+    def __init__(self):
+        self.records: list[logging.LogRecord] = []
+
+    @property
+    def output(self) -> list[str]:
+        return [
+            f"{record.levelname}:{record.name}:{record.getMessage()}"
+            for record in self.records
+        ]
+
+
+@contextlib.contextmanager
+def capture_logs(logger_name: str, level: str = "DEBUG"):
+    """Capture log output from a named logger at or above the given level."""
+    logger = logging.getLogger(logger_name)
+    captured = _CapturedLogs()
+    old_level = logger.level
+    logger.setLevel(getattr(logging, level))
+
+    class _Handler(logging.Handler):
+        def emit(self, record):
+            captured.records.append(record)
+
+    handler = _Handler()
+    handler.setLevel(getattr(logging, level))
+    logger.addHandler(handler)
+    try:
+        yield captured
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(old_level)
+
+
 class _LoggerState(TypedDict):
     level: int
     handlers: list[logging.Handler]
@@ -164,7 +201,7 @@ class LoggingIsolationMixin:
                 "disabled": logger.disabled,
             }
 
-    def tearDown(self) -> None:  # pylint: disable=invalid-name
+    def teardown_method(self) -> None:
         """Restore environment, modules, and loggers after each test."""
         for key in self._LOGGING_ENV_KEYS:
             os.environ.pop(key, None)
@@ -240,10 +277,9 @@ class LoggingIsolationMixin:
         logging_config = self._load_module("logging_config", "logging_config.py")
 
         inductor_package_name = "_inductor"
-        inductor_package = sys.modules.get(inductor_package_name)
-        if inductor_package is None:
+        if sys.modules.get(inductor_package_name) is None:
             assert PACKAGE_ROOT is not None
-            inductor_package = self._ensure_package_module(
+            self._ensure_package_module(
                 inductor_package_name,
                 PACKAGE_ROOT / "_inductor",
             )
@@ -266,7 +302,7 @@ class LoggingIsolationMixin:
         return logging_config, logging_utils
 
 
-class UnifiedLoggingPatternTests(LoggingIsolationMixin, unittest.TestCase):
+class TestUnifiedLoggingPatterns(LoggingIsolationMixin):
     """Tests for the unified logging configuration flow."""
 
     def test_unified_spyre_logs_controls_new_patterns(self) -> None:
@@ -277,24 +313,12 @@ class UnifiedLoggingPatternTests(LoggingIsolationMixin, unittest.TestCase):
         compile_logger = logging_utils.get_logger("sdsc_compile")
         wd_logger = logging_utils.get_logger("work_division")
 
-        self.assertEqual(
-            compile_logger.name,
-            "spyre.inductor.sdsc_compile",
-        )
-        self.assertEqual(
-            compile_logger.level,
-            int(logging_config.LogLevel.DEBUG),
-        )
-        self.assertEqual(
-            wd_logger.level,
-            int(logging_config.LogLevel.DEBUG),
-        )
-        self.assertEqual(
-            logging_config.get_config_source("spyre.inductor"),
-            "SPYRE_LOGS",
-        )
+        assert compile_logger.name == "spyre.inductor.sdsc_compile"
+        assert compile_logger.level == int(logging_config.LogLevel.DEBUG)
+        assert wd_logger.level == int(logging_config.LogLevel.DEBUG)
+        assert logging_config.get_config_source("spyre.inductor") == "SPYRE_LOGS"
 
-        with self.assertLogs("spyre", level="DEBUG") as captured:
+        with capture_logs("spyre", level="DEBUG") as captured:
             compile_logger.warning(
                 "WARNING: Compiling unimplemented aten.custom_op to runtime exception"
             )
@@ -309,50 +333,39 @@ class UnifiedLoggingPatternTests(LoggingIsolationMixin, unittest.TestCase):
             )
 
         output = "\n".join(captured.output)
-        self.assertIn(
-            "WARNING: Compiling unimplemented aten.custom_op to runtime exception",
-            output,
+        assert (
+            "WARNING: Compiling unimplemented aten.custom_op to runtime exception"
+            in output
         )
-        self.assertIn(
-            "No valid split combo found for tensor buf0 coord=x",
-            output,
-        )
-        self.assertIn(
-            "Cannot satisfy minimum split requirement for x",
-            output,
-        )
+        assert "No valid split combo found for tensor buf0 coord=x" in output
+        assert "Cannot satisfy minimum split requirement for x" in output
 
     def test_programmatic_override_enables_component_specific_messages(self) -> None:
         """Verify programmatic overrides affect a specific component logger."""
         logging_config, logging_utils = self._reload_logging_modules()
 
         test_logger = logging_utils.get_logger("test_component")
-        self.assertEqual(test_logger.level, int(logging_config.LogLevel.DEBUG))
+        assert test_logger.level == int(logging_config.LogLevel.WARNING)
 
-        logging_config.set_log_level("spyre.inductor.test_component", "DEBUG")
+        logging_utils.update_log_level("test_component", "DEBUG")
         refreshed_logger = logging_utils.get_logger("test_component")
 
-        self.assertIs(test_logger, refreshed_logger)
-        self.assertEqual(
-            refreshed_logger.level,
-            int(logging_config.LogLevel.DEBUG),
-        )
-        self.assertEqual(
-            logging_config.get_config_source("spyre.inductor.test_component"),
-            "programmatic",
+        assert test_logger is refreshed_logger
+        assert refreshed_logger.level == int(logging_config.LogLevel.DEBUG)
+        assert (
+            logging_config.get_config_source("spyre.inductor.test_component")
+            == "programmatic"
         )
 
-        with self.assertLogs(
-            "spyre.inductor.test_component", level="DEBUG"
-        ) as captured:
+        with capture_logs("spyre.inductor.test_component", level="DEBUG") as captured:
             refreshed_logger.debug("This DEBUG message should now be visible")
             refreshed_logger.info("This INFO message should be visible")
             refreshed_logger.warning("This WARNING message should be visible")
 
-        self.assertEqual(len(captured.output), 3)
+        assert len(captured.output) == 3
 
 
-class LegacyCompatibilityTests(LoggingIsolationMixin, unittest.TestCase):
+class TestLegacyCompatibility(LoggingIsolationMixin):
     """Tests for the legacy-to-unified logging compatibility layer."""
 
     def test_legacy_environment_variables_map_to_unified_config(self) -> None:
@@ -367,38 +380,30 @@ class LegacyCompatibilityTests(LoggingIsolationMixin, unittest.TestCase):
             logging_config, logging_utils = self._reload_logging_modules()
 
         messages = [str(w.message) for w in caught]
-        self.assertEqual(
-            logging_config.get_effective_config()["spyre.inductor"],
-            "DEBUG",
+        assert logging_config.get_effective_config()["spyre.inductor"] == "DEBUG"
+        assert (
+            logging_config.get_config_source("spyre.inductor")
+            == "legacy:SPYRE_INDUCTOR_LOG"
         )
-        self.assertEqual(
-            logging_config.get_config_source("spyre.inductor"),
-            "legacy:SPYRE_INDUCTOR_LOG",
+        assert logging_config.get_effective_config()["spyre.runtime"] == "DEBUG"
+        assert (
+            logging_config.get_config_source("spyre.runtime")
+            == "legacy:TORCH_SPYRE_DEBUG"
         )
-        self.assertEqual(
-            logging_config.get_effective_config()["spyre.runtime"],
-            "DEBUG",
+        assert any(
+            "SPYRE_INDUCTOR_LOG is deprecated" in message for message in messages
         )
-        self.assertEqual(
-            logging_config.get_config_source("spyre.runtime"),
-            "legacy:TORCH_SPYRE_DEBUG",
-        )
-        self.assertTrue(
-            any("SPYRE_INDUCTOR_LOG is deprecated" in message for message in messages)
-        )
-        self.assertTrue(
-            any("TORCH_SPYRE_DEBUG is deprecated" in message for message in messages)
-        )
+        assert any("TORCH_SPYRE_DEBUG is deprecated" in message for message in messages)
 
         legacy_logger = logging_utils.get_logger("legacy_test")
-        with self.assertLogs("spyre.inductor.legacy_test", level="DEBUG") as captured:
+        with capture_logs("spyre.inductor.legacy_test", level="DEBUG") as captured:
             legacy_logger.debug(
                 "DEBUG message (enabled via SPYRE_INDUCTOR_LOG_LEVEL=DEBUG)"
             )
             legacy_logger.info("INFO message")
             legacy_logger.warning("WARNING message")
 
-        self.assertEqual(len(captured.output), 3)
+        assert len(captured.output) == 3
 
     def test_legacy_log_file_env_var_maps_to_unified_config(self) -> None:
         """Verify SPYRE_LOG_FILE maps into unified output config with warning."""
@@ -409,12 +414,10 @@ class LegacyCompatibilityTests(LoggingIsolationMixin, unittest.TestCase):
             logging_config, _ = self._reload_logging_modules()
 
         output_config = logging_config.get_output_config()
-        self.assertEqual(output_config["log_file"], "/tmp/spyre-legacy.log")
-        self.assertEqual(output_config["log_file_source"], "legacy:SPYRE_LOG_FILE")
+        assert output_config["log_file"] == "/tmp/spyre-legacy.log"
+        assert output_config["log_file_source"] == "legacy:SPYRE_LOG_FILE"
         messages = [str(w.message) for w in caught]
-        self.assertTrue(
-            any("SPYRE_LOG_FILE is deprecated" in message for message in messages)
-        )
+        assert any("SPYRE_LOG_FILE is deprecated" in message for message in messages)
 
     def test_torch_logs_spyre_entries_trigger_deprecation(self) -> None:
         """Verify TORCH_LOGS with spyre.* entries still works but warns."""
@@ -434,7 +437,7 @@ class LegacyCompatibilityTests(LoggingIsolationMixin, unittest.TestCase):
         assert logging_config.get_config_source("spyre.inductor") == "legacy:TORCH_LOGS"
 
 
-class CompleteIntegrationTests(LoggingIsolationMixin, unittest.TestCase):
+class TestCompleteIntegration(LoggingIsolationMixin):
     """End-to-end tests for integrated logging configuration behavior."""
 
     def test_integration_flow_covers_factory_loggers_components_and_output_config(
@@ -447,22 +450,20 @@ class CompleteIntegrationTests(LoggingIsolationMixin, unittest.TestCase):
             log_path = os.path.join(tmpdir, "spyre.log")
             logging_config, logging_utils = self._reload_logging_modules()
 
-            self.assertNotIn(
-                "legacy:", logging_config.get_config_source("spyre.inductor")
-            )
+            assert "legacy:" not in logging_config.get_config_source("spyre.inductor")
             components = logging_config.list_components()
-            self.assertIn("spyre.inductor", components)
-            self.assertIn("spyre.execution", components)
+            assert "spyre.inductor" in components
+            assert "spyre.execution" in components
 
-            self.assertEqual(logging_utils.lowering_log.name, "spyre.inductor.lowering")
-            self.assertEqual(logging_utils.codegen_log.name, "spyre.inductor.codegen")
-            self.assertEqual(logging_utils.stickify_log.name, "spyre.inductor.stickify")
-            self.assertEqual(logging_utils.passes_log.name, "spyre.inductor.passes")
+            assert logging_utils.lowering_log.name == "spyre.inductor.lowering"
+            assert logging_utils.codegen_log.name == "spyre.inductor.codegen"
+            assert logging_utils.stickify_log.name == "spyre.inductor.stickify"
+            assert logging_utils.passes_log.name == "spyre.inductor.passes"
 
             logging_config.set_log_file(log_path)
             output_config = logging_config.get_output_config()
-            self.assertEqual(output_config["log_file"], log_path)
-            self.assertEqual(output_config["log_file_source"], "programmatic")
+            assert output_config["log_file"] == log_path
+            assert output_config["log_file_source"] == "programmatic"
 
             compile_logger = logging_utils.get_logger("sdsc_compile")
             wd_logger = logging_utils.get_logger("work_division")
@@ -486,23 +487,16 @@ class CompleteIntegrationTests(LoggingIsolationMixin, unittest.TestCase):
             with open(log_path, encoding="utf-8") as handle:
                 contents = handle.read()
 
-        self.assertIn(
+        assert (
             "[WARNING] [spyre.inductor.sdsc_compile] WARNING: "
-            "Compiling unimplemented aten.test_op to runtime exception",
-            contents,
-        )
-        self.assertIn(
+            "Compiling unimplemented aten.test_op to runtime exception"
+        ) in contents
+        assert (
             "[WARNING] [spyre.inductor.work_division] No valid split combo "
             "found for tensor buf0 coord=x under accumulated_splits"
-            "={'x': 4}. Skipping.",
-            contents,
-        )
-        self.assertIn(
+            "={'x': 4}. Skipping."
+        ) in contents
+        assert (
             "[WARNING] [spyre.inductor.propagate_layouts] Warning: "
-            "unhandled node type <class 'TestNode'>",
-            contents,
-        )
-
-
-if __name__ == "__main__":
-    unittest.main()
+            "unhandled node type <class 'TestNode'>"
+        ) in contents

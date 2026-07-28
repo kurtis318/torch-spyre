@@ -247,17 +247,12 @@ class LoggingIsolationMixin:
                 "logging_config.py if this checkout stores sources elsewhere."
             )
 
-        file_path = Path(str(PACKAGE_ROOT) + "/logging_config.py")
-        if not file_path.is_file():
-            pytest.skip(f"Invalid torch_spyre package root: {PACKAGE_ROOT}")
-
         logging_config = self._load_module("logging_config", "logging_config.py")
 
         inductor_package_name = "_inductor"
-        inductor_package = sys.modules.get(inductor_package_name)
-        if inductor_package is None:
+        if sys.modules.get(inductor_package_name) is None:
             assert PACKAGE_ROOT is not None
-            inductor_package = self._ensure_package_module(
+            self._ensure_package_module(
                 inductor_package_name,
                 PACKAGE_ROOT / "_inductor",
             )
