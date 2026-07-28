@@ -21,8 +21,6 @@ import logging
 import os
 import sys
 import tempfile
-import types
-import unittest
 import warnings
 from collections.abc import Generator
 from pathlib import Path
@@ -30,6 +28,8 @@ from types import ModuleType
 from typing import TypedDict
 
 import pytest
+
+pytestmark = pytest.mark.serial
 
 TEST_FILE = Path(__file__).resolve()
 
@@ -115,32 +115,45 @@ class _LoggerState(TypedDict):
 class LoggingIsolationMixin:
     """Shared helpers for isolating logging state across tests."""
 
-    def setUp(self) -> None:  # pylint: disable=invalid-name
+    _LOGGING_ENV_KEYS = (
+        "SPYRE_LOGS",
+        "TORCH_LOGS",
+        "SPYRE_INDUCTOR_LOG",
+        "SPYRE_INDUCTOR_LOG_LEVEL",
+        "TORCH_SPYRE_DEBUG",
+        "SPYRE_LOG_FILE",
+    )
+
+    _MODULE_NAMES = (
+        "logging_config",
+        "_inductor.logging_utils",
+        "torch_spyre.logging_config",
+        "torch_spyre._inductor.logging_utils",
+    )
+
+    _LOGGER_NAMES = (
+        "spyre",
+        "spyre.inductor",
+        "spyre.inductor.lowering",
+        "spyre.inductor.codegen",
+        "spyre.inductor.stickify",
+        "spyre.inductor.passes",
+        "spyre.inductor.sdsc_compile",
+        "spyre.inductor.work_division",
+        "spyre.inductor.propagate_layouts",
+        "spyre.inductor.test_component",
+        "spyre.inductor.legacy_test",
+        "spyre.runtime",
+    )
+
+    def setup_method(self) -> None:
         """Save process environment, modules, and logger state before each test."""
-        self._original_env = os.environ.copy()
+        self._saved_env = {key: os.environ.get(key) for key in self._LOGGING_ENV_KEYS}
         self._saved_modules = {
-            name: sys.modules.get(name)
-            for name in (
-                "torch_spyre.logging_config",
-                "torch_spyre._inductor.logging_utils",
-            )
+            name: sys.modules.get(name) for name in self._MODULE_NAMES
         }
         self._saved_loggers = {
-            name: logging.getLogger(name)
-            for name in (
-                "spyre",
-                "spyre.inductor",
-                "spyre.inductor.lowering",
-                "spyre.inductor.codegen",
-                "spyre.inductor.stickify",
-                "spyre.inductor.passes",
-                "spyre.inductor.sdsc_compile",
-                "spyre.inductor.work_division",
-                "spyre.inductor.propagate_layouts",
-                "spyre.inductor.test_component",
-                "spyre.inductor.legacy_test",
-                "spyre.runtime",
-            )
+            name: logging.getLogger(name) for name in self._LOGGER_NAMES
         }
         self._saved_logger_state: dict[str, _LoggerState] = {}
         for name, logger in self._saved_loggers.items():
@@ -153,26 +166,21 @@ class LoggingIsolationMixin:
 
     def tearDown(self) -> None:  # pylint: disable=invalid-name
         """Restore environment, modules, and loggers after each test."""
-        os.environ.clear()
-        os.environ.update(self._original_env)
+        for key in self._LOGGING_ENV_KEYS:
+            os.environ.pop(key, None)
+        for key, value in self._saved_env.items():
+            if value is not None:
+                os.environ[key] = value
 
-        for module_name in (
-            "torch_spyre.logging_config",
-            "torch_spyre._inductor.logging_utils",
-        ):
+        for module_name in self._MODULE_NAMES:
             if module_name in sys.modules:
                 del sys.modules[module_name]
 
-        # Also clean up submodule attributes on the torch_spyre package,
-        # which persist even after sys.modules entries are deleted.
         ts_mod = sys.modules.get("torch_spyre")
         if ts_mod:
             for attr in ("logging_config", "_inductor"):
                 if hasattr(ts_mod, attr):
-                    try:
-                        delattr(ts_mod, attr)
-                    except AttributeError:
-                        pass
+                    delattr(ts_mod, attr)
 
         for name, module in self._saved_modules.items():
             if module is not None:
@@ -205,7 +213,7 @@ class LoggingIsolationMixin:
         if isinstance(package, ModuleType):
             return package
 
-        package = types.ModuleType(package_name)
+        package = ModuleType(package_name)
         package.__file__ = str(package_path / "__init__.py")
         package.__package__ = package_name
         package.__path__ = [str(package_path)]
@@ -227,10 +235,6 @@ class LoggingIsolationMixin:
                 "Set TORCH_SPYRE_PACKAGE_ROOT to the directory containing "
                 "logging_config.py if this checkout stores sources elsewhere."
             )
-
-        file_path = Path(str(PACKAGE_ROOT) + "/logging_config.py")
-        if not file_path.is_file():
-            pytest.skip(f"Invalid torch_spyre package root: {PACKAGE_ROOT}")
 
         # Load logging_config — reads SPYRE_LOGS, no conflict with torch
         logging_config = self._load_module("logging_config", "logging_config.py")

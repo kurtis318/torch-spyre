@@ -24,6 +24,7 @@ This module provides a centralized logging configuration system that:
 
 import logging
 import os
+import threading
 import warnings
 from enum import IntEnum
 from typing import Dict, List, Optional, Tuple
@@ -59,17 +60,7 @@ _log_file_path: Optional[str] = None
 _log_file_source: str = "default"
 _initialized = False
 _python_logging_configured = False
-_lock = None  # Will be threading.Lock() after import
-
-
-def _get_lock():
-    """Lazy initialization of lock to avoid import issues."""
-    global _lock
-    if _lock is None:
-        import threading
-
-        _lock = threading.RLock()
-    return _lock
+_lock = threading.RLock()
 
 
 def _parse_spyre_logs() -> Tuple[Dict[str, LogLevel], Dict[str, str]]:
@@ -198,31 +189,25 @@ def _parse_legacy_vars() -> Tuple[Dict[str, LogLevel], Dict[str, str]]:
                 DeprecationWarning,
                 stacklevel=3,
             )
-            for entry in torch_logs.split(","):
-                entry = entry.strip()
-                if not entry:
-                    continue
+            for entry in spyre_entries:
                 if entry.startswith("+"):
                     component = entry[1:]
-                    if component.startswith("spyre"):
-                        config[component] = LogLevel.INFO
-                        sources[component] = "legacy:TORCH_LOGS"
+                    config[component] = LogLevel.INFO
+                    sources[component] = "legacy:TORCH_LOGS"
                 elif entry.startswith("-"):
                     component = entry[1:]
-                    if component.startswith("spyre"):
-                        config[component] = LogLevel.DISABLED
-                        sources[component] = "legacy:TORCH_LOGS"
+                    config[component] = LogLevel.DISABLED
+                    sources[component] = "legacy:TORCH_LOGS"
                 elif ":" in entry:
                     component, level_str = entry.split(":", 1)
                     component = component.strip()
                     level_str = level_str.strip()
-                    if component.startswith("spyre"):
-                        try:
-                            level = getattr(LogLevel, level_str.upper())
-                            config[component] = level
-                            sources[component] = "legacy:TORCH_LOGS"
-                        except AttributeError:
-                            pass
+                    try:
+                        level = getattr(LogLevel, level_str.upper())
+                        config[component] = level
+                        sources[component] = "legacy:TORCH_LOGS"
+                    except AttributeError:
+                        pass
 
     return config, sources
 
@@ -297,7 +282,7 @@ def configure_python_logging():
     if not _initialized:
         initialize()
 
-    with _get_lock():
+    with _lock:
         spyre_logger = logging.getLogger("spyre")
         spyre_logger.setLevel(int(get_log_level("spyre")))
 
@@ -342,14 +327,13 @@ def initialize():
     """
     global _config, _initialized
 
-    with _get_lock():
+    with _lock:
         if _initialized:
             return
 
         _config = _resolve_config()
         _initialized = True
-
-    configure_python_logging()
+        configure_python_logging()
 
 
 def _sync_cpp_config():
@@ -370,7 +354,7 @@ def reset():
     global _config, _config_source, _log_file_path, _log_file_source
     global _initialized, _python_logging_configured
 
-    with _get_lock():
+    with _lock:
         _config = {}
         _config_source = {}
         _log_file_path = None
@@ -394,14 +378,15 @@ def get_log_level(component: str) -> LogLevel:
     if not _initialized:
         initialize()
 
-    if component in _config:
-        return _config[component]
+    with _lock:
+        if component in _config:
+            return _config[component]
 
-    parts = component.split(".")
-    for i in range(len(parts), 0, -1):
-        parent = ".".join(parts[:i])
-        if parent in _config:
-            return _config[parent]
+        parts = component.split(".")
+        for i in range(len(parts) - 1, 0, -1):
+            parent = ".".join(parts[:i])
+            if parent in _config:
+                return _config[parent]
 
     return LogLevel.WARNING
 
@@ -421,17 +406,14 @@ def set_log_level(component: str, level: str):
     except AttributeError as exc:
         raise ValueError(f"Invalid log level: {level}") from exc
 
-    with _get_lock():
+    with _lock:
         _config[component] = level_enum
         _config_source[component] = "programmatic"
 
         logger = logging.getLogger(component)
         logger.setLevel(int(level_enum))
 
-        if component == "spyre":
-            root_logger = logging.getLogger("spyre")
-            root_logger.setLevel(int(level_enum))
-    _sync_cpp_config()  # Push change to C++ singleton
+    _sync_cpp_config()
 
 
 def enable(component: str):
@@ -456,7 +438,8 @@ def get_log_file() -> Optional[str]:
     """Get the configured log file path, if any."""
     if not _initialized:
         initialize()
-    return _log_file_path
+    with _lock:
+        return _log_file_path
 
 
 def set_log_file(path: Optional[str]):
@@ -473,7 +456,7 @@ def set_log_file(path: Optional[str]):
     if not _initialized:
         initialize()
 
-    with _get_lock():
+    with _lock:
         _log_file_path = path
         _log_file_source = "programmatic" if path else "default"
         _python_logging_configured = False
@@ -491,7 +474,8 @@ def get_effective_config() -> Dict[str, str]:
     if not _initialized:
         initialize()
 
-    return {component: level.name for component, level in _config.items()}
+    with _lock:
+        return {component: level.name for component, level in _config.items()}
 
 
 def get_output_config() -> Dict[str, Optional[str]]:
@@ -499,10 +483,11 @@ def get_output_config() -> Dict[str, Optional[str]]:
     if not _initialized:
         initialize()
 
-    return {
-        "log_file": _log_file_path,
-        "log_file_source": _log_file_source,
-    }
+    with _lock:
+        return {
+            "log_file": _log_file_path,
+            "log_file_source": _log_file_source,
+        }
 
 
 def get_config_source(component: str) -> str:
@@ -518,7 +503,8 @@ def get_config_source(component: str) -> str:
     if not _initialized:
         initialize()
 
-    return _config_source.get(component, "default")
+    with _lock:
+        return _config_source.get(component, "default")
 
 
 def list_components() -> List[str]:
@@ -539,7 +525,8 @@ def get_config_for_cpp() -> List[Tuple[str, int]]:
     if not _initialized:
         initialize()
 
-    return [(comp, int(level)) for comp, level in _config.items()]
+    with _lock:
+        return [(comp, int(level)) for comp, level in _config.items()]
 
 
 initialize()
