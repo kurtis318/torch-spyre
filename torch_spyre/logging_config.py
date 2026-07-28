@@ -72,7 +72,7 @@ def _get_lock():
     return _lock
 
 
-def _parse_spyre_logs() -> Dict[str, LogLevel]:
+def _parse_spyre_logs() -> Tuple[Dict[str, LogLevel], Dict[str, str]]:
     """Parse SPYRE_LOGS environment variable for spyre namespaces.
 
     Supported formats:
@@ -82,13 +82,15 @@ def _parse_spyre_logs() -> Dict[str, LogLevel]:
     - SPYRE_LOGS="spyre:INFO,spyre.inductor:DEBUG"
 
     Returns:
-        Dictionary mapping component names to log levels
+        Tuple of (config dict mapping component names to log levels,
+                  sources dict mapping component names to source labels)
     """
     config: Dict[str, LogLevel] = {}
+    sources: Dict[str, str] = {}
     spyre_logs = os.environ.get("SPYRE_LOGS", "")
 
     if not spyre_logs:
-        return config
+        return config, sources
 
     for entry in spyre_logs.split(","):
         entry = entry.strip()
@@ -99,12 +101,12 @@ def _parse_spyre_logs() -> Dict[str, LogLevel]:
             component = entry[1:]
             if component.startswith("spyre"):
                 config[component] = LogLevel.INFO
-                _config_source[component] = "SPYRE_LOGS"
+                sources[component] = "SPYRE_LOGS"
         elif entry.startswith("-"):
             component = entry[1:]
             if component.startswith("spyre"):
                 config[component] = LogLevel.DISABLED
-                _config_source[component] = "SPYRE_LOGS"
+                sources[component] = "SPYRE_LOGS"
         elif ":" in entry:
             component, level_str = entry.split(":", 1)
             component = component.strip()
@@ -113,17 +115,17 @@ def _parse_spyre_logs() -> Dict[str, LogLevel]:
                 try:
                     level = getattr(LogLevel, level_str.upper())
                     config[component] = level
-                    _config_source[component] = "SPYRE_LOGS"
+                    sources[component] = "SPYRE_LOGS"
                 except AttributeError:
                     warnings.warn(
                         f"Invalid log level '{level_str}' for {component}",
                         stacklevel=3,
                     )
 
-    return config
+    return config, sources
 
 
-def _parse_legacy_vars() -> Dict[str, LogLevel]:
+def _parse_legacy_vars() -> Tuple[Dict[str, LogLevel], Dict[str, str]]:
     """Parse legacy environment variables with deprecation warnings.
 
     Legacy variables:
@@ -133,11 +135,13 @@ def _parse_legacy_vars() -> Dict[str, LogLevel]:
     - SPYRE_LOG_FILE=/path/to/file.log
 
     Returns:
-        Dictionary mapping component names to log levels
+        Tuple of (config dict mapping component names to log levels,
+                  sources dict mapping component names to source labels)
     """
     global _log_file_path, _log_file_source
 
     config: Dict[str, LogLevel] = {}
+    sources: Dict[str, str] = {}
 
     if os.environ.get("SPYRE_INDUCTOR_LOG") == "1":
         warnings.warn(
@@ -150,10 +154,10 @@ def _parse_legacy_vars() -> Dict[str, LogLevel]:
         try:
             level = getattr(LogLevel, level_str.upper())
             config["spyre.inductor"] = level
-            _config_source["spyre.inductor"] = "legacy:SPYRE_INDUCTOR_LOG"
+            sources["spyre.inductor"] = "legacy:SPYRE_INDUCTOR_LOG"
         except AttributeError:
             config["spyre.inductor"] = LogLevel.INFO
-            _config_source["spyre.inductor"] = "legacy:SPYRE_INDUCTOR_LOG"
+            sources["spyre.inductor"] = "legacy:SPYRE_INDUCTOR_LOG"
 
     if os.environ.get("TORCH_SPYRE_DEBUG") == "1":
         warnings.warn(
@@ -164,7 +168,7 @@ def _parse_legacy_vars() -> Dict[str, LogLevel]:
         for component in DEFAULT_LOG_LEVELS:
             if component not in config:
                 config[component] = LogLevel.DEBUG
-                _config_source[component] = "legacy:TORCH_SPYRE_DEBUG"
+                sources[component] = "legacy:TORCH_SPYRE_DEBUG"
 
     legacy_log_file = os.environ.get("SPYRE_LOG_FILE")
     if legacy_log_file:
@@ -187,7 +191,8 @@ def _parse_legacy_vars() -> Dict[str, LogLevel]:
         if has_spyre_entries:
             warnings.warn(
                 "Setting spyre.* namespaces via TORCH_LOGS is deprecated. "
-                "Use SPYRE_LOGS instead (same syntax). "
+                "Use SPYRE_LOGS for spyre.* entries instead (same syntax). "
+                "Non-spyre entries in TORCH_LOGS are unaffected. "
                 "Example: SPYRE_LOGS='spyre.inductor:DEBUG'",
                 DeprecationWarning,
                 stacklevel=3,
@@ -200,12 +205,12 @@ def _parse_legacy_vars() -> Dict[str, LogLevel]:
                     component = entry[1:]
                     if component.startswith("spyre"):
                         config[component] = LogLevel.INFO
-                        _config_source[component] = "legacy:TORCH_LOGS"
+                        sources[component] = "legacy:TORCH_LOGS"
                 elif entry.startswith("-"):
                     component = entry[1:]
                     if component.startswith("spyre"):
                         config[component] = LogLevel.DISABLED
-                        _config_source[component] = "legacy:TORCH_LOGS"
+                        sources[component] = "legacy:TORCH_LOGS"
                 elif ":" in entry:
                     component, level_str = entry.split(":", 1)
                     component = component.strip()
@@ -214,11 +219,11 @@ def _parse_legacy_vars() -> Dict[str, LogLevel]:
                         try:
                             level = getattr(LogLevel, level_str.upper())
                             config[component] = level
-                            _config_source[component] = "legacy:TORCH_LOGS"
+                            sources[component] = "legacy:TORCH_LOGS"
                         except AttributeError:
                             pass
 
-    return config
+    return config, sources
 
 
 def _resolve_config() -> Dict[str, LogLevel]:
@@ -236,11 +241,13 @@ def _resolve_config() -> Dict[str, LogLevel]:
     """
     config = DEFAULT_LOG_LEVELS.copy()
 
-    legacy_config = _parse_legacy_vars()
+    legacy_config, legacy_sources = _parse_legacy_vars()
     config.update(legacy_config)
+    _config_source.update(legacy_sources)
 
-    spyre_logs_config = _parse_spyre_logs()
+    spyre_logs_config, spyre_sources = _parse_spyre_logs()
     config.update(spyre_logs_config)
+    _config_source.update(spyre_sources)
 
     # When a user explicitly configures a parent component, propagate that
     # level to any more-specific defaults that would otherwise shadow it.
