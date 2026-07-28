@@ -183,17 +183,18 @@ def _parse_legacy_vars() -> Tuple[Dict[str, LogLevel], Dict[str, str]]:
 
     torch_logs = os.environ.get("TORCH_LOGS", "")
     if torch_logs:
-        has_spyre_entries = any(
-            entry.strip().lstrip("+-").startswith("spyre")
+        spyre_entries = [
+            entry.strip()
             for entry in torch_logs.split(",")
-            if entry.strip()
-        )
-        if has_spyre_entries:
+            if entry.strip() and entry.strip().lstrip("+-").startswith("spyre")
+        ]
+        if spyre_entries:
+            found = ", ".join(spyre_entries)
             warnings.warn(
-                "Setting spyre.* namespaces via TORCH_LOGS is deprecated. "
-                "Use SPYRE_LOGS for spyre.* entries instead (same syntax). "
-                "Non-spyre entries in TORCH_LOGS are unaffected. "
-                "Example: SPYRE_LOGS='spyre.inductor:DEBUG'",
+                f"TORCH_LOGS contains spyre.* entries ({found}) which should "
+                f"be moved to SPYRE_LOGS. "
+                f"Non-spyre TORCH_LOGS entries (e.g. '+inductor') are "
+                f"unaffected. Replace with: SPYRE_LOGS='{','.join(spyre_entries)}'",
                 DeprecationWarning,
                 stacklevel=3,
             )

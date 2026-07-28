@@ -426,7 +426,7 @@ class TestLegacyCompatibility(LoggingIsolationMixin):
 
         messages = [str(w.message) for w in caught]
         assert any(
-            "TORCH_LOGS is deprecated" in m or "Use SPYRE_LOGS instead" in m
+            "TORCH_LOGS contains spyre.*" in m or "moved to SPYRE_LOGS" in m
             for m in messages
         )
         assert logging_config.get_effective_config()["spyre.inductor"] == "DEBUG"
