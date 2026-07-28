@@ -27,7 +27,6 @@ import logging
 import os
 import sys
 import tempfile
-import types
 import unittest
 import warnings
 from collections.abc import Generator
@@ -36,6 +35,8 @@ from types import ModuleType
 from typing import TypedDict
 
 import pytest
+
+pytestmark = pytest.mark.serial
 
 TEST_FILE = Path(__file__).resolve()
 
@@ -134,15 +135,27 @@ _ALL_LOGGER_NAMES = (
 )
 
 
+_LOGGING_ENV_KEYS = (
+    "SPYRE_LOGS",
+    "TORCH_LOGS",
+    "SPYRE_INDUCTOR_LOG",
+    "SPYRE_INDUCTOR_LOG_LEVEL",
+    "TORCH_SPYRE_DEBUG",
+    "SPYRE_LOG_FILE",
+)
+
+
 class LoggingIsolationMixin:
     """Shared helpers for isolating logging state across tests."""
 
     def setUp(self) -> None:  # pylint: disable=invalid-name
         """Save process environment, modules, and logger state before each test."""
-        self._original_env = os.environ.copy()
+        self._saved_env = {key: os.environ.get(key) for key in _LOGGING_ENV_KEYS}
         self._saved_modules = {
             name: sys.modules.get(name)
             for name in (
+                "logging_config",
+                "_inductor.logging_utils",
                 "torch_spyre.logging_config",
                 "torch_spyre._inductor.logging_utils",
             )
@@ -161,10 +174,15 @@ class LoggingIsolationMixin:
 
     def tearDown(self) -> None:  # pylint: disable=invalid-name
         """Restore environment, modules, and loggers after each test."""
-        os.environ.clear()
-        os.environ.update(self._original_env)
+        for key in _LOGGING_ENV_KEYS:
+            os.environ.pop(key, None)
+        for key, value in self._saved_env.items():
+            if value is not None:
+                os.environ[key] = value
 
         for module_name in (
+            "logging_config",
+            "_inductor.logging_utils",
             "torch_spyre.logging_config",
             "torch_spyre._inductor.logging_utils",
         ):
@@ -175,10 +193,7 @@ class LoggingIsolationMixin:
         if ts_mod:
             for attr in ("logging_config", "_inductor"):
                 if hasattr(ts_mod, attr):
-                    try:
-                        delattr(ts_mod, attr)
-                    except AttributeError:
-                        pass
+                    delattr(ts_mod, attr)
 
         for name, module in self._saved_modules.items():
             if module is not None:
@@ -211,7 +226,7 @@ class LoggingIsolationMixin:
         if isinstance(package, ModuleType):
             return package
 
-        package = types.ModuleType(package_name)
+        package = ModuleType(package_name)
         package.__file__ = str(package_path / "__init__.py")
         package.__package__ = package_name
         package.__path__ = [str(package_path)]
@@ -797,7 +812,7 @@ class TestSpyreLogsDisable(LoggingIsolationMixin, unittest.TestCase):
     def test_disable_does_not_emit_messages(self) -> None:
         """A disabled component should not emit any log messages."""
         os.environ["SPYRE_LOGS"] = "-spyre.inductor"
-        logging_config, logging_utils = self._reload_logging_modules()
+        _, logging_utils = self._reload_logging_modules()
 
         logger = logging_utils.get_logger("codegen")
 
