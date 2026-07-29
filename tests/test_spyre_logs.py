@@ -21,13 +21,13 @@ Tests cover:
 - Precedence, hierarchy propagation, disabling, invalid levels, file output
 """
 
+import contextlib
 import importlib.machinery
 import importlib.util
 import logging
 import os
 import sys
 import tempfile
-import unittest
 import warnings
 from collections.abc import Generator
 from pathlib import Path
@@ -111,6 +111,42 @@ if PACKAGE_ROOT is not None:
         sys.path.insert(0, str(BASE_DIR))
 
 
+class _CapturedLogs:
+    """Container for captured log records."""
+
+    def __init__(self):
+        self.records: list[logging.LogRecord] = []
+
+    @property
+    def output(self) -> list[str]:
+        return [
+            f"{record.levelname}:{record.name}:{record.getMessage()}"
+            for record in self.records
+        ]
+
+
+@contextlib.contextmanager
+def capture_logs(logger_name: str, level: str = "DEBUG"):
+    """Capture log output from a named logger at or above the given level."""
+    logger = logging.getLogger(logger_name)
+    captured = _CapturedLogs()
+    old_level = logger.level
+    logger.setLevel(getattr(logging, level))
+
+    class _Handler(logging.Handler):
+        def emit(self, record):
+            captured.records.append(record)
+
+    handler = _Handler()
+    handler.setLevel(getattr(logging, level))
+    logger.addHandler(handler)
+    try:
+        yield captured
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(old_level)
+
+
 class _LoggerState(TypedDict):
     level: int
     handlers: list[logging.Handler]
@@ -148,7 +184,7 @@ _LOGGING_ENV_KEYS = (
 class LoggingIsolationMixin:
     """Shared helpers for isolating logging state across tests."""
 
-    def setUp(self) -> None:  # pylint: disable=invalid-name
+    def setup_method(self) -> None:
         """Save process environment, modules, and logger state before each test."""
         self._saved_env = {key: os.environ.get(key) for key in _LOGGING_ENV_KEYS}
         self._saved_modules = {
@@ -172,7 +208,7 @@ class LoggingIsolationMixin:
                 "disabled": logger.disabled,
             }
 
-    def tearDown(self) -> None:  # pylint: disable=invalid-name
+    def teardown_method(self) -> None:
         """Restore environment, modules, and loggers after each test."""
         for key in _LOGGING_ENV_KEYS:
             os.environ.pop(key, None)
@@ -276,7 +312,7 @@ class LoggingIsolationMixin:
 # ---------------------------------------------------------------------------
 
 
-class TestPythonLoggingSingleComponent(LoggingIsolationMixin, unittest.TestCase):
+class TestPythonLoggingSingleComponent(LoggingIsolationMixin):
     """Python logging with a single component configured via SPYRE_LOGS."""
 
     def test_debug_single_component(self) -> None:
@@ -285,14 +321,12 @@ class TestPythonLoggingSingleComponent(LoggingIsolationMixin, unittest.TestCase)
         logging_config, logging_utils = self._reload_logging_modules()
 
         logger = logging_utils.get_logger("codegen")
-        self.assertEqual(logger.level, int(logging_config.LogLevel.DEBUG))
+        assert logger.level == int(logging_config.LogLevel.DEBUG)
 
-        with self.assertLogs("spyre.inductor.codegen", level="DEBUG") as captured:
+        with capture_logs("spyre.inductor.codegen", level="DEBUG") as captured:
             logger.debug("debug single component message")
 
-        self.assertTrue(
-            any("debug single component message" in msg for msg in captured.output)
-        )
+        assert any("debug single component message" in msg for msg in captured.output)
 
     def test_info_single_component(self) -> None:
         """INFO messages visible when one component set to INFO."""
@@ -300,14 +334,12 @@ class TestPythonLoggingSingleComponent(LoggingIsolationMixin, unittest.TestCase)
         logging_config, logging_utils = self._reload_logging_modules()
 
         logger = logging_utils.get_logger("lowering")
-        self.assertEqual(logger.level, int(logging_config.LogLevel.INFO))
+        assert logger.level == int(logging_config.LogLevel.INFO)
 
-        with self.assertLogs("spyre.inductor.lowering", level="INFO") as captured:
+        with capture_logs("spyre.inductor.lowering", level="INFO") as captured:
             logger.info("info single component message")
 
-        self.assertTrue(
-            any("info single component message" in msg for msg in captured.output)
-        )
+        assert any("info single component message" in msg for msg in captured.output)
 
     def test_warning_single_component(self) -> None:
         """WARNING messages visible when one component set to WARNING."""
@@ -315,14 +347,12 @@ class TestPythonLoggingSingleComponent(LoggingIsolationMixin, unittest.TestCase)
         logging_config, logging_utils = self._reload_logging_modules()
 
         logger = logging_utils.get_logger("passes")
-        self.assertEqual(logger.level, int(logging_config.LogLevel.WARNING))
+        assert logger.level == int(logging_config.LogLevel.WARNING)
 
-        with self.assertLogs("spyre.inductor.passes", level="WARNING") as captured:
+        with capture_logs("spyre.inductor.passes", level="WARNING") as captured:
             logger.warning("warning single component message")
 
-        self.assertTrue(
-            any("warning single component message" in msg for msg in captured.output)
-        )
+        assert any("warning single component message" in msg for msg in captured.output)
 
     def test_critical_single_component(self) -> None:
         """CRITICAL (fatal) messages visible when one component set to CRITICAL."""
@@ -330,17 +360,17 @@ class TestPythonLoggingSingleComponent(LoggingIsolationMixin, unittest.TestCase)
         logging_config, logging_utils = self._reload_logging_modules()
 
         logger = logging_utils.get_logger("stickify")
-        self.assertEqual(logger.level, int(logging_config.LogLevel.CRITICAL))
+        assert logger.level == int(logging_config.LogLevel.CRITICAL)
 
-        with self.assertLogs("spyre.inductor.stickify", level="CRITICAL") as captured:
+        with capture_logs("spyre.inductor.stickify", level="CRITICAL") as captured:
             logger.critical("critical single component message")
 
-        self.assertTrue(
-            any("critical single component message" in msg for msg in captured.output)
+        assert any(
+            "critical single component message" in msg for msg in captured.output
         )
 
 
-class TestPythonLoggingTwoComponents(LoggingIsolationMixin, unittest.TestCase):
+class TestPythonLoggingTwoComponents(LoggingIsolationMixin):
     """Python logging with two components configured via SPYRE_LOGS."""
 
     def test_debug_two_components(self) -> None:
@@ -351,16 +381,16 @@ class TestPythonLoggingTwoComponents(LoggingIsolationMixin, unittest.TestCase):
         inductor_logger = logging_utils.get_logger("codegen")
         runtime_logger = logging.getLogger("spyre.runtime")
 
-        self.assertEqual(inductor_logger.level, int(logging_config.LogLevel.DEBUG))
-        self.assertEqual(runtime_logger.level, int(logging_config.LogLevel.DEBUG))
+        assert inductor_logger.level == int(logging_config.LogLevel.DEBUG)
+        assert runtime_logger.level == int(logging_config.LogLevel.DEBUG)
 
-        with self.assertLogs("spyre", level="DEBUG") as captured:
+        with capture_logs("spyre", level="DEBUG") as captured:
             inductor_logger.debug("debug inductor message")
             runtime_logger.debug("debug runtime message")
 
         output = "\n".join(captured.output)
-        self.assertIn("debug inductor message", output)
-        self.assertIn("debug runtime message", output)
+        assert "debug inductor message" in output
+        assert "debug runtime message" in output
 
     def test_info_two_components(self) -> None:
         """INFO messages visible on two independently configured components."""
@@ -370,16 +400,16 @@ class TestPythonLoggingTwoComponents(LoggingIsolationMixin, unittest.TestCase):
         inductor_logger = logging_utils.get_logger("lowering")
         execution_logger = logging.getLogger("spyre.execution")
 
-        self.assertEqual(inductor_logger.level, int(logging_config.LogLevel.INFO))
-        self.assertEqual(execution_logger.level, int(logging_config.LogLevel.INFO))
+        assert inductor_logger.level == int(logging_config.LogLevel.INFO)
+        assert execution_logger.level == int(logging_config.LogLevel.INFO)
 
-        with self.assertLogs("spyre", level="INFO") as captured:
+        with capture_logs("spyre", level="INFO") as captured:
             inductor_logger.info("info inductor message")
             execution_logger.info("info execution message")
 
         output = "\n".join(captured.output)
-        self.assertIn("info inductor message", output)
-        self.assertIn("info execution message", output)
+        assert "info inductor message" in output
+        assert "info execution message" in output
 
     def test_warning_two_components(self) -> None:
         """WARNING messages visible on two independently configured components."""
@@ -389,16 +419,16 @@ class TestPythonLoggingTwoComponents(LoggingIsolationMixin, unittest.TestCase):
         inductor_logger = logging_utils.get_logger("passes")
         device_logger = logging.getLogger("spyre.device")
 
-        self.assertEqual(inductor_logger.level, int(logging_config.LogLevel.WARNING))
-        self.assertEqual(device_logger.level, int(logging_config.LogLevel.WARNING))
+        assert inductor_logger.level == int(logging_config.LogLevel.WARNING)
+        assert device_logger.level == int(logging_config.LogLevel.WARNING)
 
-        with self.assertLogs("spyre", level="WARNING") as captured:
+        with capture_logs("spyre", level="WARNING") as captured:
             inductor_logger.warning("warning inductor message")
             device_logger.warning("warning device message")
 
         output = "\n".join(captured.output)
-        self.assertIn("warning inductor message", output)
-        self.assertIn("warning device message", output)
+        assert "warning inductor message" in output
+        assert "warning device message" in output
 
     def test_critical_two_components(self) -> None:
         """CRITICAL messages visible on two independently configured components."""
@@ -408,19 +438,19 @@ class TestPythonLoggingTwoComponents(LoggingIsolationMixin, unittest.TestCase):
         inductor_logger = logging_utils.get_logger("codegen")
         runtime_logger = logging.getLogger("spyre.runtime")
 
-        self.assertEqual(inductor_logger.level, int(logging_config.LogLevel.CRITICAL))
-        self.assertEqual(runtime_logger.level, int(logging_config.LogLevel.CRITICAL))
+        assert inductor_logger.level == int(logging_config.LogLevel.CRITICAL)
+        assert runtime_logger.level == int(logging_config.LogLevel.CRITICAL)
 
-        with self.assertLogs("spyre", level="CRITICAL") as captured:
+        with capture_logs("spyre", level="CRITICAL") as captured:
             inductor_logger.critical("critical inductor message")
             runtime_logger.critical("critical runtime message")
 
         output = "\n".join(captured.output)
-        self.assertIn("critical inductor message", output)
-        self.assertIn("critical runtime message", output)
+        assert "critical inductor message" in output
+        assert "critical runtime message" in output
 
 
-class TestPythonLoggingThreeComponents(LoggingIsolationMixin, unittest.TestCase):
+class TestPythonLoggingThreeComponents(LoggingIsolationMixin):
     """Python logging with three components configured via SPYRE_LOGS."""
 
     def test_debug_three_components(self) -> None:
@@ -434,19 +464,19 @@ class TestPythonLoggingThreeComponents(LoggingIsolationMixin, unittest.TestCase)
         runtime_logger = logging.getLogger("spyre.runtime")
         execution_logger = logging.getLogger("spyre.execution")
 
-        self.assertEqual(inductor_logger.level, int(logging_config.LogLevel.DEBUG))
-        self.assertEqual(runtime_logger.level, int(logging_config.LogLevel.DEBUG))
-        self.assertEqual(execution_logger.level, int(logging_config.LogLevel.DEBUG))
+        assert inductor_logger.level == int(logging_config.LogLevel.DEBUG)
+        assert runtime_logger.level == int(logging_config.LogLevel.DEBUG)
+        assert execution_logger.level == int(logging_config.LogLevel.DEBUG)
 
-        with self.assertLogs("spyre", level="DEBUG") as captured:
+        with capture_logs("spyre", level="DEBUG") as captured:
             inductor_logger.debug("debug inductor three")
             runtime_logger.debug("debug runtime three")
             execution_logger.debug("debug execution three")
 
         output = "\n".join(captured.output)
-        self.assertIn("debug inductor three", output)
-        self.assertIn("debug runtime three", output)
-        self.assertIn("debug execution three", output)
+        assert "debug inductor three" in output
+        assert "debug runtime three" in output
+        assert "debug execution three" in output
 
     def test_info_three_components(self) -> None:
         """INFO messages visible across three configured components."""
@@ -459,19 +489,19 @@ class TestPythonLoggingThreeComponents(LoggingIsolationMixin, unittest.TestCase)
         runtime_logger = logging.getLogger("spyre.runtime")
         device_logger = logging.getLogger("spyre.device")
 
-        self.assertEqual(inductor_logger.level, int(logging_config.LogLevel.INFO))
-        self.assertEqual(runtime_logger.level, int(logging_config.LogLevel.INFO))
-        self.assertEqual(device_logger.level, int(logging_config.LogLevel.INFO))
+        assert inductor_logger.level == int(logging_config.LogLevel.INFO)
+        assert runtime_logger.level == int(logging_config.LogLevel.INFO)
+        assert device_logger.level == int(logging_config.LogLevel.INFO)
 
-        with self.assertLogs("spyre", level="INFO") as captured:
+        with capture_logs("spyre", level="INFO") as captured:
             inductor_logger.info("info inductor three")
             runtime_logger.info("info runtime three")
             device_logger.info("info device three")
 
         output = "\n".join(captured.output)
-        self.assertIn("info inductor three", output)
-        self.assertIn("info runtime three", output)
-        self.assertIn("info device three", output)
+        assert "info inductor three" in output
+        assert "info runtime three" in output
+        assert "info device three" in output
 
     def test_warning_three_components(self) -> None:
         """WARNING messages visible across three configured components."""
@@ -484,19 +514,19 @@ class TestPythonLoggingThreeComponents(LoggingIsolationMixin, unittest.TestCase)
         execution_logger = logging.getLogger("spyre.execution")
         device_logger = logging.getLogger("spyre.device")
 
-        self.assertEqual(inductor_logger.level, int(logging_config.LogLevel.WARNING))
-        self.assertEqual(execution_logger.level, int(logging_config.LogLevel.WARNING))
-        self.assertEqual(device_logger.level, int(logging_config.LogLevel.WARNING))
+        assert inductor_logger.level == int(logging_config.LogLevel.WARNING)
+        assert execution_logger.level == int(logging_config.LogLevel.WARNING)
+        assert device_logger.level == int(logging_config.LogLevel.WARNING)
 
-        with self.assertLogs("spyre", level="WARNING") as captured:
+        with capture_logs("spyre", level="WARNING") as captured:
             inductor_logger.warning("warning inductor three")
             execution_logger.warning("warning execution three")
             device_logger.warning("warning device three")
 
         output = "\n".join(captured.output)
-        self.assertIn("warning inductor three", output)
-        self.assertIn("warning execution three", output)
-        self.assertIn("warning device three", output)
+        assert "warning inductor three" in output
+        assert "warning execution three" in output
+        assert "warning device three" in output
 
     def test_critical_three_components(self) -> None:
         """CRITICAL messages visible across three configured components."""
@@ -509,19 +539,19 @@ class TestPythonLoggingThreeComponents(LoggingIsolationMixin, unittest.TestCase)
         runtime_logger = logging.getLogger("spyre.runtime")
         execution_logger = logging.getLogger("spyre.execution")
 
-        self.assertEqual(inductor_logger.level, int(logging_config.LogLevel.CRITICAL))
-        self.assertEqual(runtime_logger.level, int(logging_config.LogLevel.CRITICAL))
-        self.assertEqual(execution_logger.level, int(logging_config.LogLevel.CRITICAL))
+        assert inductor_logger.level == int(logging_config.LogLevel.CRITICAL)
+        assert runtime_logger.level == int(logging_config.LogLevel.CRITICAL)
+        assert execution_logger.level == int(logging_config.LogLevel.CRITICAL)
 
-        with self.assertLogs("spyre", level="CRITICAL") as captured:
+        with capture_logs("spyre", level="CRITICAL") as captured:
             inductor_logger.critical("critical inductor three")
             runtime_logger.critical("critical runtime three")
             execution_logger.critical("critical execution three")
 
         output = "\n".join(captured.output)
-        self.assertIn("critical inductor three", output)
-        self.assertIn("critical runtime three", output)
-        self.assertIn("critical execution three", output)
+        assert "critical inductor three" in output
+        assert "critical runtime three" in output
+        assert "critical execution three" in output
 
     def test_mixed_levels_three_components(self) -> None:
         """Different log levels across three components."""
@@ -534,9 +564,9 @@ class TestPythonLoggingThreeComponents(LoggingIsolationMixin, unittest.TestCase)
         runtime_logger = logging.getLogger("spyre.runtime")
         execution_logger = logging.getLogger("spyre.execution")
 
-        self.assertEqual(inductor_logger.level, int(logging_config.LogLevel.DEBUG))
-        self.assertEqual(runtime_logger.level, int(logging_config.LogLevel.WARNING))
-        self.assertEqual(execution_logger.level, int(logging_config.LogLevel.INFO))
+        assert inductor_logger.level == int(logging_config.LogLevel.DEBUG)
+        assert runtime_logger.level == int(logging_config.LogLevel.WARNING)
+        assert execution_logger.level == int(logging_config.LogLevel.INFO)
 
 
 # ---------------------------------------------------------------------------
@@ -582,7 +612,7 @@ def _run_subprocess_with_env(env_vars: dict[str, str], script: str) -> str:
     _find_torch_spyre_lib() is None,
     reason="torch_spyre C++ extension not built",
 )
-class TestCppLoggingSingleComponent(unittest.TestCase):
+class TestCppLoggingSingleComponent:
     """C++ DEBUGINFO macro controlled by the legacy TORCH_SPYRE_DEBUG env var."""
 
     def test_debuginfo_enabled_single(self) -> None:
@@ -593,10 +623,7 @@ import torch
 t = torch.zeros(2, 2, dtype=torch.float16)
 """
         output = _run_subprocess_with_env({"TORCH_SPYRE_DEBUG": "1"}, script)
-        # When TORCH_SPYRE_DEBUG=1, the C++ code enables g_debug_info_enabled.
-        # We verify the import doesn't crash and the env var is recognized.
-        # Actual DEBUGINFO output depends on runtime code paths being exercised.
-        self.assertNotIn("Traceback", output)
+        assert "Traceback" not in output
 
     def test_debuginfo_disabled_single(self) -> None:
         """DEBUGINFO produces no output when TORCH_SPYRE_DEBUG is unset."""
@@ -607,7 +634,7 @@ t = torch.zeros(2, 2, dtype=torch.float16)
 print("CLEAN_EXIT")
 """
         output = _run_subprocess_with_env({}, script)
-        self.assertIn("CLEAN_EXIT", output)
+        assert "CLEAN_EXIT" in output
 
     def test_debuginfo_zero_disables_single(self) -> None:
         """DEBUGINFO is disabled when TORCH_SPYRE_DEBUG=0."""
@@ -616,14 +643,14 @@ import torch_spyre
 print("CLEAN_EXIT")
 """
         output = _run_subprocess_with_env({"TORCH_SPYRE_DEBUG": "0"}, script)
-        self.assertIn("CLEAN_EXIT", output)
+        assert "CLEAN_EXIT" in output
 
 
 @pytest.mark.skipif(
     _find_torch_spyre_lib() is None,
     reason="torch_spyre C++ extension not built",
 )
-class TestCppLoggingTwoComponents(unittest.TestCase):
+class TestCppLoggingTwoComponents:
     """C++ DEBUGINFO (legacy TORCH_SPYRE_DEBUG) combined with Python SPYRE_LOGS."""
 
     def test_cpp_and_python_debug_two_components(self) -> None:
@@ -648,8 +675,8 @@ print("TWO_COMP_EXIT")
             },
             script,
         )
-        self.assertIn("TWO_COMP_EXIT", output)
-        self.assertNotIn("Traceback", output)
+        assert "TWO_COMP_EXIT" in output
+        assert "Traceback" not in output
 
     def test_cpp_disabled_python_enabled_two_components(self) -> None:
         """C++ disabled, Python DEBUG on two components."""
@@ -669,16 +696,16 @@ print("TWO_COMP_NO_CPP_EXIT")
             {"SPYRE_LOGS": "spyre.inductor:DEBUG,spyre.execution:DEBUG"},
             script,
         )
-        self.assertIn("TWO_COMP_NO_CPP_EXIT", output)
-        self.assertNotIn("Traceback", output)
+        assert "TWO_COMP_NO_CPP_EXIT" in output
+        assert "Traceback" not in output
 
 
 @pytest.mark.skipif(
     _find_torch_spyre_lib() is None,
     reason="torch_spyre C++ extension not built",
 )
-class TestCppLoggingThreeComponents(unittest.TestCase):
-    """C++ DEBUGINFO (legacy TORCH_SPYRE_DEBUG) combined with Python SPYRE_LOGS on three components."""
+class TestCppLoggingThreeComponents:
+    """C++ DEBUGINFO combined with Python SPYRE_LOGS on three components."""
 
     def test_cpp_and_python_debug_three_components(self) -> None:
         """C++ DEBUGINFO and Python DEBUG on three components simultaneously."""
@@ -704,8 +731,8 @@ print("THREE_COMP_EXIT")
             },
             script,
         )
-        self.assertIn("THREE_COMP_EXIT", output)
-        self.assertNotIn("Traceback", output)
+        assert "THREE_COMP_EXIT" in output
+        assert "Traceback" not in output
 
     def test_cpp_enabled_python_mixed_three_components(self) -> None:
         """C++ DEBUGINFO on, Python at mixed levels across three components."""
@@ -731,8 +758,8 @@ print("THREE_MIXED_EXIT")
             },
             script,
         )
-        self.assertIn("THREE_MIXED_EXIT", output)
-        self.assertNotIn("Traceback", output)
+        assert "THREE_MIXED_EXIT" in output
+        assert "Traceback" not in output
 
 
 # ---------------------------------------------------------------------------
@@ -740,7 +767,7 @@ print("THREE_MIXED_EXIT")
 # ---------------------------------------------------------------------------
 
 
-class TestSpyreLogsPrecedence(LoggingIsolationMixin, unittest.TestCase):
+class TestSpyreLogsPrecedence(LoggingIsolationMixin):
     """SPYRE_LOGS takes precedence over legacy env vars."""
 
     def test_spyre_logs_overrides_legacy_inductor_log(self) -> None:
@@ -753,12 +780,8 @@ class TestSpyreLogsPrecedence(LoggingIsolationMixin, unittest.TestCase):
             warnings.simplefilter("always")
             logging_config, _ = self._reload_logging_modules()
 
-        self.assertEqual(
-            logging_config.get_effective_config()["spyre.inductor"], "DEBUG"
-        )
-        self.assertEqual(
-            logging_config.get_config_source("spyre.inductor"), "SPYRE_LOGS"
-        )
+        assert logging_config.get_effective_config()["spyre.inductor"] == "DEBUG"
+        assert logging_config.get_config_source("spyre.inductor") == "SPYRE_LOGS"
 
     def test_spyre_logs_overrides_torch_spyre_debug(self) -> None:
         """SPYRE_LOGS overrides TORCH_SPYRE_DEBUG when both are set."""
@@ -769,12 +792,8 @@ class TestSpyreLogsPrecedence(LoggingIsolationMixin, unittest.TestCase):
             warnings.simplefilter("always")
             logging_config, _ = self._reload_logging_modules()
 
-        self.assertEqual(
-            logging_config.get_effective_config()["spyre.inductor"], "INFO"
-        )
-        self.assertEqual(
-            logging_config.get_config_source("spyre.inductor"), "SPYRE_LOGS"
-        )
+        assert logging_config.get_effective_config()["spyre.inductor"] == "INFO"
+        assert logging_config.get_config_source("spyre.inductor") == "SPYRE_LOGS"
 
     def test_spyre_logs_overrides_torch_logs(self) -> None:
         """SPYRE_LOGS overrides TORCH_LOGS spyre.* entries."""
@@ -785,15 +804,11 @@ class TestSpyreLogsPrecedence(LoggingIsolationMixin, unittest.TestCase):
             warnings.simplefilter("always")
             logging_config, _ = self._reload_logging_modules()
 
-        self.assertEqual(
-            logging_config.get_effective_config()["spyre.inductor"], "DEBUG"
-        )
-        self.assertEqual(
-            logging_config.get_config_source("spyre.inductor"), "SPYRE_LOGS"
-        )
+        assert logging_config.get_effective_config()["spyre.inductor"] == "DEBUG"
+        assert logging_config.get_config_source("spyre.inductor") == "SPYRE_LOGS"
 
 
-class TestSpyreLogsDisable(LoggingIsolationMixin, unittest.TestCase):
+class TestSpyreLogsDisable(LoggingIsolationMixin):
     """Tests for disabling logging via SPYRE_LOGS."""
 
     def test_disable_with_minus_prefix(self) -> None:
@@ -802,7 +817,7 @@ class TestSpyreLogsDisable(LoggingIsolationMixin, unittest.TestCase):
         logging_config, logging_utils = self._reload_logging_modules()
 
         logger = logging_utils.get_logger("codegen")
-        self.assertEqual(logger.level, int(logging_config.LogLevel.DISABLED))
+        assert logger.level == int(logging_config.LogLevel.DISABLED)
 
     def test_disable_does_not_emit_messages(self) -> None:
         """A disabled component should not emit any log messages."""
@@ -811,17 +826,16 @@ class TestSpyreLogsDisable(LoggingIsolationMixin, unittest.TestCase):
 
         logger = logging_utils.get_logger("codegen")
 
-        # assertLogs will fail if no records are captured — that's what we want
-        # to verify, so we use assertRaises to confirm no records.
-        with self.assertRaises(AssertionError):
-            with self.assertLogs("spyre.inductor.codegen", level="DEBUG"):
-                logger.debug("should not appear")
-                logger.info("should not appear")
-                logger.warning("should not appear")
-                logger.critical("should not appear")
+        with capture_logs("spyre.inductor.codegen", level="DEBUG") as captured:
+            logger.debug("should not appear")
+            logger.info("should not appear")
+            logger.warning("should not appear")
+            logger.critical("should not appear")
+
+        assert len(captured.records) == 0
 
 
-class TestSpyreLogsPlusPrefix(LoggingIsolationMixin, unittest.TestCase):
+class TestSpyreLogsPlusPrefix(LoggingIsolationMixin):
     """Tests for the '+' shorthand prefix in SPYRE_LOGS."""
 
     def test_plus_prefix_enables_at_info(self) -> None:
@@ -830,25 +844,23 @@ class TestSpyreLogsPlusPrefix(LoggingIsolationMixin, unittest.TestCase):
         logging_config, logging_utils = self._reload_logging_modules()
 
         logger = logging_utils.get_logger("codegen")
-        self.assertEqual(logger.level, int(logging_config.LogLevel.INFO))
-        self.assertEqual(
-            logging_config.get_config_source("spyre.inductor"), "SPYRE_LOGS"
-        )
+        assert logger.level == int(logging_config.LogLevel.INFO)
+        assert logging_config.get_config_source("spyre.inductor") == "SPYRE_LOGS"
 
     def test_plus_prefix_info_visible_debug_hidden(self) -> None:
         """With '+' prefix, INFO is visible but DEBUG is suppressed."""
         os.environ["SPYRE_LOGS"] = "+spyre.inductor"
-        logging_config, logging_utils = self._reload_logging_modules()
+        _, logging_utils = self._reload_logging_modules()
 
         logger = logging_utils.get_logger("codegen")
 
-        with self.assertLogs("spyre.inductor.codegen", level="INFO") as captured:
+        with capture_logs("spyre.inductor.codegen", level="INFO") as captured:
             logger.info("visible info message")
 
-        self.assertTrue(any("visible info message" in msg for msg in captured.output))
+        assert any("visible info message" in msg for msg in captured.output)
 
 
-class TestSpyreLogsInvalidInput(LoggingIsolationMixin, unittest.TestCase):
+class TestSpyreLogsInvalidInput(LoggingIsolationMixin):
     """Tests for invalid SPYRE_LOGS values."""
 
     def test_invalid_level_emits_warning(self) -> None:
@@ -857,33 +869,29 @@ class TestSpyreLogsInvalidInput(LoggingIsolationMixin, unittest.TestCase):
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            logging_config, _ = self._reload_logging_modules()
+            self._reload_logging_modules()
 
         messages = [str(w.message) for w in caught]
-        self.assertTrue(any("Invalid log level" in msg for msg in messages))
+        assert any("Invalid log level" in msg for msg in messages)
 
     def test_non_spyre_entries_ignored(self) -> None:
         """Non-spyre entries in SPYRE_LOGS are silently ignored."""
         os.environ["SPYRE_LOGS"] = "other.module:DEBUG,spyre.inductor:INFO"
         logging_config, _ = self._reload_logging_modules()
 
-        self.assertEqual(
-            logging_config.get_effective_config()["spyre.inductor"], "INFO"
-        )
-        self.assertNotIn("other.module", logging_config.get_effective_config())
+        assert logging_config.get_effective_config()["spyre.inductor"] == "INFO"
+        assert "other.module" not in logging_config.get_effective_config()
 
     def test_empty_spyre_logs_uses_defaults(self) -> None:
         """Empty SPYRE_LOGS falls back to default WARNING levels."""
         os.environ["SPYRE_LOGS"] = ""
         logging_config, _ = self._reload_logging_modules()
 
-        self.assertEqual(
-            logging_config.get_effective_config()["spyre.inductor"], "WARNING"
-        )
-        self.assertEqual(logging_config.get_config_source("spyre.inductor"), "default")
+        assert logging_config.get_effective_config()["spyre.inductor"] == "WARNING"
+        assert logging_config.get_config_source("spyre.inductor") == "default"
 
 
-class TestSpyreLogsHierarchyPropagation(LoggingIsolationMixin, unittest.TestCase):
+class TestSpyreLogsHierarchyPropagation(LoggingIsolationMixin):
     """Tests for hierarchical level propagation from parent to child."""
 
     def test_parent_level_propagates_to_children(self) -> None:
@@ -895,9 +903,9 @@ class TestSpyreLogsHierarchyPropagation(LoggingIsolationMixin, unittest.TestCase
         lowering_logger = logging_utils.get_logger("lowering")
         passes_logger = logging_utils.get_logger("passes")
 
-        self.assertEqual(codegen_logger.level, int(logging_config.LogLevel.DEBUG))
-        self.assertEqual(lowering_logger.level, int(logging_config.LogLevel.DEBUG))
-        self.assertEqual(passes_logger.level, int(logging_config.LogLevel.DEBUG))
+        assert codegen_logger.level == int(logging_config.LogLevel.DEBUG)
+        assert lowering_logger.level == int(logging_config.LogLevel.DEBUG)
+        assert passes_logger.level == int(logging_config.LogLevel.DEBUG)
 
     def test_root_spyre_propagates_to_all(self) -> None:
         """Setting spyre:INFO propagates to all child components."""
@@ -905,14 +913,14 @@ class TestSpyreLogsHierarchyPropagation(LoggingIsolationMixin, unittest.TestCase
         logging_config, _ = self._reload_logging_modules()
 
         config = logging_config.get_effective_config()
-        self.assertEqual(config["spyre"], "INFO")
-        self.assertEqual(config["spyre.inductor"], "INFO")
-        self.assertEqual(config["spyre.runtime"], "INFO")
-        self.assertEqual(config["spyre.execution"], "INFO")
-        self.assertEqual(config["spyre.device"], "INFO")
+        assert config["spyre"] == "INFO"
+        assert config["spyre.inductor"] == "INFO"
+        assert config["spyre.runtime"] == "INFO"
+        assert config["spyre.execution"] == "INFO"
+        assert config["spyre.device"] == "INFO"
 
 
-class TestSpyreLogsFileOutput(LoggingIsolationMixin, unittest.TestCase):
+class TestSpyreLogsFileOutput(LoggingIsolationMixin):
     """Tests for log file output configuration."""
 
     def test_spyre_logs_with_programmatic_file_output(self) -> None:
@@ -940,17 +948,14 @@ class TestSpyreLogsFileOutput(LoggingIsolationMixin, unittest.TestCase):
             with open(log_path, encoding="utf-8") as handle:
                 contents = handle.read()
 
-        self.assertIn(
-            "[DEBUG] [spyre.inductor.codegen] file output debug message", contents
+        assert "[DEBUG] [spyre.inductor.codegen] file output debug message" in contents
+        assert "[INFO] [spyre.inductor.codegen] file output info message" in contents
+        assert (
+            "[WARNING] [spyre.inductor.codegen] file output warning message" in contents
         )
-        self.assertIn(
-            "[INFO] [spyre.inductor.codegen] file output info message", contents
-        )
-        self.assertIn(
-            "[WARNING] [spyre.inductor.codegen] file output warning message", contents
-        )
-        self.assertIn(
-            "[CRITICAL] [spyre.inductor.codegen] file output critical message", contents
+        assert (
+            "[CRITICAL] [spyre.inductor.codegen] file output critical message"
+            in contents
         )
 
     def test_legacy_spyre_log_file_still_works(self) -> None:
@@ -962,19 +967,17 @@ class TestSpyreLogsFileOutput(LoggingIsolationMixin, unittest.TestCase):
 
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
-                logging_config, logging_utils = self._reload_logging_modules()
+                logging_config, _ = self._reload_logging_modules()
 
             messages = [str(w.message) for w in caught]
-            self.assertTrue(
-                any("SPYRE_LOG_FILE is deprecated" in msg for msg in messages)
-            )
+            assert any("SPYRE_LOG_FILE is deprecated" in msg for msg in messages)
 
             output_config = logging_config.get_output_config()
-            self.assertEqual(output_config["log_file"], log_path)
-            self.assertEqual(output_config["log_file_source"], "legacy:SPYRE_LOG_FILE")
+            assert output_config["log_file"] == log_path
+            assert output_config["log_file_source"] == "legacy:SPYRE_LOG_FILE"
 
 
-class TestSpyreLogsConfigSourceTracking(LoggingIsolationMixin, unittest.TestCase):
+class TestSpyreLogsConfigSourceTracking(LoggingIsolationMixin):
     """Tests for config source tracking."""
 
     def test_default_source(self) -> None:
@@ -985,25 +988,21 @@ class TestSpyreLogsConfigSourceTracking(LoggingIsolationMixin, unittest.TestCase
         os.environ.pop("TORCH_SPYRE_DEBUG", None)
         logging_config, _ = self._reload_logging_modules()
 
-        self.assertEqual(logging_config.get_config_source("spyre.inductor"), "default")
+        assert logging_config.get_config_source("spyre.inductor") == "default"
 
     def test_spyre_logs_source(self) -> None:
         """Components configured via SPYRE_LOGS report correct source."""
         os.environ["SPYRE_LOGS"] = "spyre.inductor:DEBUG"
         logging_config, _ = self._reload_logging_modules()
 
-        self.assertEqual(
-            logging_config.get_config_source("spyre.inductor"), "SPYRE_LOGS"
-        )
+        assert logging_config.get_config_source("spyre.inductor") == "SPYRE_LOGS"
 
     def test_programmatic_source(self) -> None:
         """Programmatically configured components report 'programmatic'."""
         logging_config, _ = self._reload_logging_modules()
         logging_config.set_log_level("spyre.inductor", "DEBUG")
 
-        self.assertEqual(
-            logging_config.get_config_source("spyre.inductor"), "programmatic"
-        )
+        assert logging_config.get_config_source("spyre.inductor") == "programmatic"
 
     def test_legacy_torch_logs_source(self) -> None:
         """TORCH_LOGS with spyre entries reports 'legacy:TORCH_LOGS'."""
@@ -1014,12 +1013,10 @@ class TestSpyreLogsConfigSourceTracking(LoggingIsolationMixin, unittest.TestCase
             warnings.simplefilter("always")
             logging_config, _ = self._reload_logging_modules()
 
-        self.assertEqual(
-            logging_config.get_config_source("spyre.inductor"), "legacy:TORCH_LOGS"
-        )
+        assert logging_config.get_config_source("spyre.inductor") == "legacy:TORCH_LOGS"
 
 
-class TestSpyreLogsMultiEntryParsing(LoggingIsolationMixin, unittest.TestCase):
+class TestSpyreLogsMultiEntryParsing(LoggingIsolationMixin):
     """Tests for comma-separated multi-entry SPYRE_LOGS parsing."""
 
     def test_comma_separated_entries(self) -> None:
@@ -1030,9 +1027,9 @@ class TestSpyreLogsMultiEntryParsing(LoggingIsolationMixin, unittest.TestCase):
         logging_config, _ = self._reload_logging_modules()
 
         config = logging_config.get_effective_config()
-        self.assertEqual(config["spyre.inductor"], "DEBUG")
-        self.assertEqual(config["spyre.runtime"], "INFO")
-        self.assertEqual(config["spyre.device"], "ERROR")
+        assert config["spyre.inductor"] == "DEBUG"
+        assert config["spyre.runtime"] == "INFO"
+        assert config["spyre.device"] == "ERROR"
 
     def test_whitespace_tolerance(self) -> None:
         """Parser tolerates whitespace around entries."""
@@ -1040,8 +1037,8 @@ class TestSpyreLogsMultiEntryParsing(LoggingIsolationMixin, unittest.TestCase):
         logging_config, _ = self._reload_logging_modules()
 
         config = logging_config.get_effective_config()
-        self.assertEqual(config["spyre.inductor"], "DEBUG")
-        self.assertEqual(config["spyre.runtime"], "INFO")
+        assert config["spyre.inductor"] == "DEBUG"
+        assert config["spyre.runtime"] == "INFO"
 
     def test_mixed_prefixes_and_explicit_levels(self) -> None:
         """Mix of +, -, and explicit level entries."""
@@ -1049,12 +1046,12 @@ class TestSpyreLogsMultiEntryParsing(LoggingIsolationMixin, unittest.TestCase):
         logging_config, _ = self._reload_logging_modules()
 
         config = logging_config.get_effective_config()
-        self.assertEqual(config["spyre.inductor"], "INFO")
-        self.assertEqual(config["spyre.runtime"], "DISABLED")
-        self.assertEqual(config["spyre.device"], "ERROR")
+        assert config["spyre.inductor"] == "INFO"
+        assert config["spyre.runtime"] == "DISABLED"
+        assert config["spyre.device"] == "ERROR"
 
 
-class TestSpyreLogsLevelFiltering(LoggingIsolationMixin, unittest.TestCase):
+class TestSpyreLogsLevelFiltering(LoggingIsolationMixin):
     """Tests verifying that level filtering suppresses lower-priority messages."""
 
     def test_warning_level_suppresses_info_and_debug(self) -> None:
@@ -1063,21 +1060,21 @@ class TestSpyreLogsLevelFiltering(LoggingIsolationMixin, unittest.TestCase):
         logging_config, logging_utils = self._reload_logging_modules()
 
         logger = logging_utils.get_logger("codegen")
-        self.assertEqual(logger.level, int(logging_config.LogLevel.WARNING))
+        assert logger.level == int(logging_config.LogLevel.WARNING)
 
-        with self.assertLogs("spyre.inductor.codegen", level="WARNING") as captured:
+        with capture_logs("spyre.inductor.codegen", level="WARNING") as captured:
             logger.warning("visible warning")
             logger.critical("visible critical")
 
         output = "\n".join(captured.output)
-        self.assertIn("visible warning", output)
-        self.assertIn("visible critical", output)
+        assert "visible warning" in output
+        assert "visible critical" in output
 
-        # Verify debug/info would NOT be captured (they shouldn't appear)
-        with self.assertRaises(AssertionError):
-            with self.assertLogs("spyre.inductor.codegen", level="WARNING"):
-                logger.debug("invisible debug")
-                logger.info("invisible info")
+        with capture_logs("spyre.inductor.codegen", level="WARNING") as captured:
+            logger.debug("invisible debug")
+            logger.info("invisible info")
+
+        assert len(captured.records) == 0
 
     def test_info_level_suppresses_debug(self) -> None:
         """At INFO level, DEBUG messages are suppressed."""
@@ -1086,20 +1083,21 @@ class TestSpyreLogsLevelFiltering(LoggingIsolationMixin, unittest.TestCase):
 
         logger = logging_utils.get_logger("codegen")
 
-        with self.assertLogs("spyre.inductor.codegen", level="INFO") as captured:
+        with capture_logs("spyre.inductor.codegen", level="INFO") as captured:
             logger.info("visible info")
             logger.warning("visible warning")
 
         output = "\n".join(captured.output)
-        self.assertIn("visible info", output)
-        self.assertIn("visible warning", output)
+        assert "visible info" in output
+        assert "visible warning" in output
 
-        with self.assertRaises(AssertionError):
-            with self.assertLogs("spyre.inductor.codegen", level="INFO"):
-                logger.debug("invisible debug")
+        with capture_logs("spyre.inductor.codegen", level="INFO") as captured:
+            logger.debug("invisible debug")
+
+        assert len(captured.records) == 0
 
 
-class TestSpyreLogsProgrammaticAPI(LoggingIsolationMixin, unittest.TestCase):
+class TestSpyreLogsProgrammaticAPI(LoggingIsolationMixin):
     """Tests for the programmatic logging configuration API."""
 
     def test_enable_convenience_function(self) -> None:
@@ -1108,7 +1106,7 @@ class TestSpyreLogsProgrammaticAPI(LoggingIsolationMixin, unittest.TestCase):
         logging_config.enable("spyre.inductor")
 
         logger = logging_utils.get_logger("codegen")
-        self.assertEqual(logger.level, int(logging_config.LogLevel.INFO))
+        assert logger.level == int(logging_config.LogLevel.INFO)
 
     def test_disable_convenience_function(self) -> None:
         """disable() sets a component to DISABLED level."""
@@ -1116,13 +1114,13 @@ class TestSpyreLogsProgrammaticAPI(LoggingIsolationMixin, unittest.TestCase):
         logging_config.disable("spyre.inductor.codegen")
 
         logger = logging_utils.get_logger("codegen")
-        self.assertEqual(logger.level, int(logging_config.LogLevel.DISABLED))
+        assert logger.level == int(logging_config.LogLevel.DISABLED)
 
     def test_set_log_level_invalid_raises(self) -> None:
         """set_log_level with invalid level raises ValueError."""
         logging_config, _ = self._reload_logging_modules()
 
-        with self.assertRaises(ValueError):
+        with pytest.raises(ValueError):
             logging_config.set_log_level("spyre.inductor", "NOT_A_LEVEL")
 
     def test_list_components_returns_all_defaults(self) -> None:
@@ -1130,11 +1128,11 @@ class TestSpyreLogsProgrammaticAPI(LoggingIsolationMixin, unittest.TestCase):
         logging_config, _ = self._reload_logging_modules()
         components = logging_config.list_components()
 
-        self.assertIn("spyre", components)
-        self.assertIn("spyre.inductor", components)
-        self.assertIn("spyre.runtime", components)
-        self.assertIn("spyre.execution", components)
-        self.assertIn("spyre.device", components)
+        assert "spyre" in components
+        assert "spyre.inductor" in components
+        assert "spyre.runtime" in components
+        assert "spyre.execution" in components
+        assert "spyre.device" in components
 
     def test_get_config_for_cpp(self) -> None:
         """get_config_for_cpp() returns (component, int_level) tuples."""
@@ -1142,16 +1140,10 @@ class TestSpyreLogsProgrammaticAPI(LoggingIsolationMixin, unittest.TestCase):
         logging_config, _ = self._reload_logging_modules()
 
         cpp_config = logging_config.get_config_for_cpp()
-        self.assertIsInstance(cpp_config, list)
-        self.assertTrue(
-            all(isinstance(item, tuple) and len(item) == 2 for item in cpp_config)
-        )
+        assert isinstance(cpp_config, list)
+        assert all(isinstance(item, tuple) and len(item) == 2 for item in cpp_config)
 
         inductor_entry = next(
             (comp, level) for comp, level in cpp_config if comp == "spyre.inductor"
         )
-        self.assertEqual(inductor_entry[1], int(logging_config.LogLevel.DEBUG))
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert inductor_entry[1] == int(logging_config.LogLevel.DEBUG)

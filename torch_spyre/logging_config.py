@@ -63,6 +63,53 @@ _python_logging_configured = False
 _lock = threading.RLock()
 
 
+def _parse_entries(
+    entries: List[str], source_label: str
+) -> Tuple[Dict[str, LogLevel], Dict[str, str]]:
+    """Parse a list of log-config entries with +/-/: syntax.
+
+    Each entry is one of:
+    - "+spyre.inductor"  → INFO
+    - "-spyre.inductor"  → DISABLED
+    - "spyre.inductor:DEBUG" → explicit level
+
+    Non-spyre entries are silently ignored.
+
+    Returns:
+        Tuple of (config dict, sources dict)
+    """
+    config: Dict[str, LogLevel] = {}
+    sources: Dict[str, str] = {}
+
+    for entry in entries:
+        if entry.startswith("+"):
+            component = entry[1:]
+            if component.startswith("spyre"):
+                config[component] = LogLevel.INFO
+                sources[component] = source_label
+        elif entry.startswith("-"):
+            component = entry[1:]
+            if component.startswith("spyre"):
+                config[component] = LogLevel.DISABLED
+                sources[component] = source_label
+        elif ":" in entry:
+            component, level_str = entry.split(":", 1)
+            component = component.strip()
+            level_str = level_str.strip()
+            if component.startswith("spyre"):
+                try:
+                    level = getattr(LogLevel, level_str.upper())
+                    config[component] = level
+                    sources[component] = source_label
+                except AttributeError:
+                    warnings.warn(
+                        f"Invalid log level '{level_str}' for {component}",
+                        stacklevel=3,
+                    )
+
+    return config, sources
+
+
 def _parse_spyre_logs() -> Tuple[Dict[str, LogLevel], Dict[str, str]]:
     """Parse SPYRE_LOGS environment variable for spyre namespaces.
 
@@ -76,44 +123,12 @@ def _parse_spyre_logs() -> Tuple[Dict[str, LogLevel], Dict[str, str]]:
         Tuple of (config dict mapping component names to log levels,
                   sources dict mapping component names to source labels)
     """
-    config: Dict[str, LogLevel] = {}
-    sources: Dict[str, str] = {}
     spyre_logs = os.environ.get("SPYRE_LOGS", "")
-
     if not spyre_logs:
-        return config, sources
+        return {}, {}
 
-    for entry in spyre_logs.split(","):
-        entry = entry.strip()
-        if not entry:
-            continue
-
-        if entry.startswith("+"):
-            component = entry[1:]
-            if component.startswith("spyre"):
-                config[component] = LogLevel.INFO
-                sources[component] = "SPYRE_LOGS"
-        elif entry.startswith("-"):
-            component = entry[1:]
-            if component.startswith("spyre"):
-                config[component] = LogLevel.DISABLED
-                sources[component] = "SPYRE_LOGS"
-        elif ":" in entry:
-            component, level_str = entry.split(":", 1)
-            component = component.strip()
-            level_str = level_str.strip()
-            if component.startswith("spyre"):
-                try:
-                    level = getattr(LogLevel, level_str.upper())
-                    config[component] = level
-                    sources[component] = "SPYRE_LOGS"
-                except AttributeError:
-                    warnings.warn(
-                        f"Invalid log level '{level_str}' for {component}",
-                        stacklevel=3,
-                    )
-
-    return config, sources
+    entries = [e.strip() for e in spyre_logs.split(",") if e.strip()]
+    return _parse_entries(entries, "SPYRE_LOGS")
 
 
 def _parse_legacy_vars() -> Tuple[Dict[str, LogLevel], Dict[str, str]]:
@@ -189,25 +204,9 @@ def _parse_legacy_vars() -> Tuple[Dict[str, LogLevel], Dict[str, str]]:
                 DeprecationWarning,
                 stacklevel=3,
             )
-            for entry in spyre_entries:
-                if entry.startswith("+"):
-                    component = entry[1:]
-                    config[component] = LogLevel.INFO
-                    sources[component] = "legacy:TORCH_LOGS"
-                elif entry.startswith("-"):
-                    component = entry[1:]
-                    config[component] = LogLevel.DISABLED
-                    sources[component] = "legacy:TORCH_LOGS"
-                elif ":" in entry:
-                    component, level_str = entry.split(":", 1)
-                    component = component.strip()
-                    level_str = level_str.strip()
-                    try:
-                        level = getattr(LogLevel, level_str.upper())
-                        config[component] = level
-                        sources[component] = "legacy:TORCH_LOGS"
-                    except AttributeError:
-                        pass
+            tl_config, tl_sources = _parse_entries(spyre_entries, "legacy:TORCH_LOGS")
+            config.update(tl_config)
+            sources.update(tl_sources)
 
     return config, sources
 
@@ -269,13 +268,54 @@ def _make_formatter() -> logging.Formatter:
     return logging.Formatter("[%(levelname)s] [%(name)s] %(message)s")
 
 
+def _configure_python_logging_locked():
+    """Configure Python logging for spyre. Caller must hold _lock."""
+    global _python_logging_configured
+
+    if _python_logging_configured:
+        return
+
+    spyre_logger = logging.getLogger("spyre")
+    spyre_logger.setLevel(int(get_log_level("spyre")))
+
+    desired_file = _log_file_path
+    formatter = _make_formatter()
+
+    existing_file_handlers = [
+        handler
+        for handler in spyre_logger.handlers
+        if isinstance(handler, logging.FileHandler)
+    ]
+    existing_stream_handlers = [
+        handler
+        for handler in spyre_logger.handlers
+        if isinstance(handler, logging.StreamHandler)
+        and not isinstance(handler, logging.FileHandler)
+    ]
+
+    if desired_file:
+        file_handler_present = any(
+            getattr(handler, "baseFilename", None) == os.path.abspath(desired_file)
+            for handler in existing_file_handlers
+        )
+        if not file_handler_present:
+            handler = logging.FileHandler(desired_file)
+            handler.setFormatter(formatter)
+            spyre_logger.addHandler(handler)
+
+    if not existing_stream_handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(formatter)
+        spyre_logger.addHandler(handler)
+
+    _python_logging_configured = True
+
+
 def configure_python_logging():
     """Configure the top-level hierarchical Python logger for spyre.
 
     This is idempotent and safe to call multiple times.
     """
-    global _python_logging_configured
-
     if _python_logging_configured:
         return
 
@@ -283,40 +323,7 @@ def configure_python_logging():
         initialize()
 
     with _lock:
-        spyre_logger = logging.getLogger("spyre")
-        spyre_logger.setLevel(int(get_log_level("spyre")))
-
-        desired_file = _log_file_path
-        formatter = _make_formatter()
-
-        existing_file_handlers = [
-            handler
-            for handler in spyre_logger.handlers
-            if isinstance(handler, logging.FileHandler)
-        ]
-        existing_stream_handlers = [
-            handler
-            for handler in spyre_logger.handlers
-            if isinstance(handler, logging.StreamHandler)
-            and not isinstance(handler, logging.FileHandler)
-        ]
-
-        if desired_file:
-            file_handler_present = any(
-                getattr(handler, "baseFilename", None) == os.path.abspath(desired_file)
-                for handler in existing_file_handlers
-            )
-            if not file_handler_present:
-                handler = logging.FileHandler(desired_file)
-                handler.setFormatter(formatter)
-                spyre_logger.addHandler(handler)
-
-        if not existing_stream_handlers:
-            handler = logging.StreamHandler()
-            handler.setFormatter(formatter)
-            spyre_logger.addHandler(handler)
-
-        _python_logging_configured = True
+        _configure_python_logging_locked()
 
 
 def initialize():
@@ -333,7 +340,7 @@ def initialize():
 
         _config = _resolve_config()
         _initialized = True
-        configure_python_logging()
+        _configure_python_logging_locked()
 
 
 def _sync_cpp_config():
@@ -463,7 +470,7 @@ def set_log_file(path: Optional[str]):
         _log_file_path = path
         _log_file_source = "programmatic" if path else "default"
         _python_logging_configured = False
-        configure_python_logging()
+        _configure_python_logging_locked()
 
     _sync_cpp_config()
 
