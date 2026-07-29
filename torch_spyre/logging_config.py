@@ -61,6 +61,7 @@ _log_file_source: str = "default"
 _initialized = False
 _python_logging_configured = False
 _lock = threading.RLock()
+_cpp_logging_module = None  # None = not attempted, False = unavailable
 
 
 def _parse_entries(
@@ -268,6 +269,15 @@ def _make_formatter() -> logging.Formatter:
     return logging.Formatter("[%(levelname)s] [%(name)s] %(message)s")
 
 
+def _ensure_initialized_locked():
+    """Ensure module is initialized. Caller must hold _lock."""
+    global _config, _initialized
+    if not _initialized:
+        _config = _resolve_config()
+        _initialized = True
+        _configure_python_logging_locked()
+
+
 def _configure_python_logging_locked():
     """Configure Python logging for spyre. Caller must hold _lock."""
     global _python_logging_configured
@@ -276,7 +286,7 @@ def _configure_python_logging_locked():
         return
 
     spyre_logger = logging.getLogger("spyre")
-    spyre_logger.setLevel(int(get_log_level("spyre")))
+    spyre_logger.setLevel(int(_config.get("spyre", LogLevel.WARNING)))
 
     desired_file = _log_file_path
     formatter = _make_formatter()
@@ -316,13 +326,8 @@ def configure_python_logging():
 
     This is idempotent and safe to call multiple times.
     """
-    if _python_logging_configured:
-        return
-
-    if not _initialized:
-        initialize()
-
     with _lock:
+        _ensure_initialized_locked()
         _configure_python_logging_locked()
 
 
@@ -332,27 +337,33 @@ def initialize():
     This should be called once during module initialization.
     Thread-safe and idempotent.
     """
-    global _config, _initialized
-
     with _lock:
-        if _initialized:
+        _ensure_initialized_locked()
+
+
+def _sync_cpp_config(cpp_config: List[Tuple[str, int]], log_file: str):
+    """Push a config snapshot to the C++ LoggingConfig singleton.
+
+    Args:
+        cpp_config: List of (component, level_int) tuples, snapshotted
+            under _lock by the caller.
+        log_file: Log file path (empty string for none).
+    """
+    global _cpp_logging_module
+    if _cpp_logging_module is False:
+        return
+    if _cpp_logging_module is None:
+        try:
+            from torch_spyre._C import _logging  # type: ignore[attr-defined]
+
+            _cpp_logging_module = _logging
+        except (ImportError, ModuleNotFoundError):
+            _cpp_logging_module = False
             return
 
-        _config = _resolve_config()
-        _initialized = True
-        _configure_python_logging_locked()
-
-
-def _sync_cpp_config():
-    """Push current Python config to the C++ LoggingConfig singleton."""
-    try:
-        from torch_spyre._C import _logging as cpp_logging
-    except (ImportError, ModuleNotFoundError):
-        return
-
-    config = cpp_logging.LoggingConfig.instance()
-    config.initialize_from_python(get_config_for_cpp())
-    config.set_log_file(_log_file_path or "")
+    config = _cpp_logging_module.LoggingConfig.instance()
+    config.initialize_from_python(cpp_config)
+    config.set_log_file(log_file)
 
 
 def reset():
@@ -371,9 +382,11 @@ def reset():
         _log_file_source = "default"
         _initialized = False
         _python_logging_configured = False
+        _ensure_initialized_locked()
+        cpp_config = [(comp, int(lvl)) for comp, lvl in _config.items()]
+        log_file = _log_file_path or ""
 
-    initialize()
-    _sync_cpp_config()
+    _sync_cpp_config(cpp_config, log_file)
 
 
 def get_log_level(component: str) -> LogLevel:
@@ -385,10 +398,8 @@ def get_log_level(component: str) -> LogLevel:
     Returns:
         Effective log level for the component
     """
-    if not _initialized:
-        initialize()
-
     with _lock:
+        _ensure_initialized_locked()
         if component in _config:
             return _config[component]
 
@@ -408,22 +419,23 @@ def set_log_level(component: str, level: str):
         component: Component name (e.g., "spyre.inductor")
         level: Log level name (DEBUG, INFO, WARNING, ERROR, CRITICAL, DISABLED)
     """
-    if not _initialized:
-        initialize()
-
     try:
         level_enum = getattr(LogLevel, level.upper())
     except AttributeError as exc:
         raise ValueError(f"Invalid log level: {level}") from exc
 
     with _lock:
+        _ensure_initialized_locked()
         _config[component] = level_enum
         _config_source[component] = "programmatic"
 
         logger = logging.getLogger(component)
         logger.setLevel(int(level_enum))
 
-    _sync_cpp_config()
+        cpp_config = [(comp, int(lvl)) for comp, lvl in _config.items()]
+        log_file = _log_file_path or ""
+
+    _sync_cpp_config(cpp_config, log_file)
 
 
 def enable(component: str):
@@ -446,9 +458,8 @@ def disable(component: str):
 
 def get_log_file() -> Optional[str]:
     """Get the configured log file path, if any."""
-    if not _initialized:
-        initialize()
     with _lock:
+        _ensure_initialized_locked()
         return _log_file_path
 
 
@@ -463,16 +474,16 @@ def set_log_file(path: Optional[str]):
     """
     global _log_file_path, _log_file_source, _python_logging_configured
 
-    if not _initialized:
-        initialize()
-
     with _lock:
+        _ensure_initialized_locked()
         _log_file_path = path
         _log_file_source = "programmatic" if path else "default"
         _python_logging_configured = False
         _configure_python_logging_locked()
+        cpp_config = [(comp, int(lvl)) for comp, lvl in _config.items()]
+        log_file = _log_file_path or ""
 
-    _sync_cpp_config()
+    _sync_cpp_config(cpp_config, log_file)
 
 
 def get_effective_config() -> Dict[str, str]:
@@ -481,19 +492,15 @@ def get_effective_config() -> Dict[str, str]:
     Returns:
         Dictionary mapping component names to level names
     """
-    if not _initialized:
-        initialize()
-
     with _lock:
+        _ensure_initialized_locked()
         return {component: level.name for component, level in _config.items()}
 
 
 def get_output_config() -> Dict[str, Optional[str]]:
     """Get effective output configuration."""
-    if not _initialized:
-        initialize()
-
     with _lock:
+        _ensure_initialized_locked()
         return {
             "log_file": _log_file_path,
             "log_file_source": _log_file_source,
@@ -510,10 +517,8 @@ def get_config_source(component: str) -> str:
         Source name: "SPYRE_LOGS", "legacy:TORCH_LOGS", "legacy:...",
         "programmatic", or "default"
     """
-    if not _initialized:
-        initialize()
-
     with _lock:
+        _ensure_initialized_locked()
         return _config_source.get(component, "default")
 
 
@@ -532,10 +537,8 @@ def get_config_for_cpp() -> List[Tuple[str, int]]:
     Returns:
         List of (component, level) tuples with integer levels
     """
-    if not _initialized:
-        initialize()
-
     with _lock:
+        _ensure_initialized_locked()
         return [(comp, int(level)) for comp, level in _config.items()]
 
 
