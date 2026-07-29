@@ -43,6 +43,7 @@ Test sub-suites:
 | `TORCH_SPYRE_DEBUG=1` | Enable C++ debug logging and `-O0` builds |
 | `SENCORES` | Number of Spyre cores (1–32, default 32) |
 | `LX_PLANNING=1` | Enable LX scratchpad memory planning |
+| `HBM_POOL_PLANNING=1` | Enable HBM-pool planning for intermediates not in LX |
 | `LAYOUT_SOLVER` | LX layout solver: `greedy` (default), `firstfit`, `bestfit`, `cpsat` |
 | `SPYRE_LOGS="spyre.inductor:DEBUG"` | Spyre-specific hierarchical logging |
 | `TORCH_LOGS="+inductor"` | Verbose Inductor logging (spyre.* entries deprecated; use `SPYRE_LOGS`) |
