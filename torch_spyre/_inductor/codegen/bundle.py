@@ -23,8 +23,8 @@ import sympy
 from torch_spyre._inductor import config as _spyre_config
 from torch_spyre._inductor.codegen.compute_ops import SymbolKind
 from torch_spyre._inductor.codegen.superdsc import compile_op_spec
-from torch_spyre._inductor.logging_utils import get_inductor_logger, format_op_spec_list
-from torch_spyre._inductor.op_spec import LoopSpec, OpSpec
+from torch_spyre._inductor.logging_utils import get_inductor_logger
+from torch_spyre._inductor.op_spec import LoopSpec, OpSpec, format_op_spec_list
 from torch_spyre._inductor.op_spec_validation import validate_op_specs
 
 
