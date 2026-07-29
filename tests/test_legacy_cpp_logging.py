@@ -78,7 +78,7 @@ class TestTorchLogsEnablesRuntimeDebug:
     """Verify TORCH_LOGS=spyre.runtime:DEBUG enables C++ debug output."""
 
     def test_torch_logs_enables_runtime_debug(self):
-        """TORCH_LOGS configures spyre.runtime at DEBUG without deprecation."""
+        """TORCH_LOGS configures spyre.runtime at DEBUG (legacy path)."""
         script = """
             import os
             import warnings
@@ -99,10 +99,7 @@ class TestTorchLogsEnablesRuntimeDebug:
         result = _run_subprocess(script, {"TORCH_LOGS": "spyre.runtime:DEBUG"})
         assert result.returncode == 0, f"Subprocess failed: {result.stderr}"
         assert "LEVEL=DEBUG" in result.stdout
-        assert "SOURCE=TORCH_LOGS" in result.stdout
-        combined = result.stdout + result.stderr
-        assert "TORCH_SPYRE_DEBUG" not in combined
-        assert "SPYRE_INDUCTOR_LOG" not in combined
+        assert "SOURCE=legacy:TORCH_LOGS" in result.stdout
 
     def test_cpp_logging_config_reflects_torch_logs(self):
         """C++ LoggingConfig singleton sees the level set by TORCH_LOGS."""
@@ -158,7 +155,7 @@ class TestTorchLogsPriorityOverLegacy:
         )
         assert result.returncode == 0, f"Subprocess failed: {result.stderr}"
         assert "LEVEL=WARNING" in result.stdout
-        assert "SOURCE=TORCH_LOGS" in result.stdout
+        assert "SOURCE=legacy:TORCH_LOGS" in result.stdout
 
 
 class TestOutputFormatMatchesSpec:

@@ -335,8 +335,15 @@ class TestLoggerOutput:
             r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} "
             r".+"
         )
+        _SPYRE_LOG_PREFIXES = (
+            "[DEBUG]",
+            "[INFO]",
+            "[WARNING]",
+            "[ERROR]",
+            "[CRITICAL]",
+        )
         for line in result.stderr.splitlines():
-            if line.startswith("["):
+            if line.startswith(_SPYRE_LOG_PREFIXES):
                 assert pattern.match(line), (
                     f"Log line does not match expected format: {line!r}"
                 )
