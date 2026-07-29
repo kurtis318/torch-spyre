@@ -341,6 +341,15 @@ def initialize():
         _ensure_initialized_locked()
 
 
+def sync_cpp_config():
+    """Push current Python logging config to C++ — public entry point."""
+    with _lock:
+        _ensure_initialized_locked()
+        cpp_config = [(comp, int(lvl)) for comp, lvl in _config.items()]
+        log_file = _log_file_path or ""
+    _sync_cpp_config(cpp_config, log_file)
+
+
 def _sync_cpp_config(cpp_config: List[Tuple[str, int]], log_file: str):
     """Push a config snapshot to the C++ LoggingConfig singleton.
 

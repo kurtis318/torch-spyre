@@ -67,7 +67,7 @@ class _SpyreImpl:
             self._C = importlib.import_module("torch_spyre._C")
             from torch_spyre import logging_config
 
-            logging_config._sync_cpp_config()
+            logging_config.sync_cpp_config()
             # Apply pending device index before runtime init
             pending = self._pending_device_idx
             if pending is not None:
