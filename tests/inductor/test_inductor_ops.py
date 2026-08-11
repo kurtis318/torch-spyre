@@ -18,6 +18,7 @@ import unittest
 import torch
 import torch.nn.functional as F
 
+
 from utils_inductor import (
     ParameterizedTestMeta,
     _compile_and_run,
@@ -27,8 +28,10 @@ from utils_inductor import (
     make_param_dict,
     unique_randn_along_dim,
     shapes2key,
+    compare_with_pytorch,
 )
 import utils_inductor
+from torch._inductor.utils import run_and_get_code
 from torch_spyre._inductor.dtype_ops import DtypeOpTable
 from torch_spyre._inductor.constants import IDENTITY_OP
 
@@ -104,6 +107,25 @@ COMMON_REDUCTION_KEEPDIM_PARAM_SETS = {
     "pad_4d_dim_1": (1, cached_randn((3, 7, 9, 32), scale=0.1)),
     "pad_4d_dim_2": (2, cached_randn((3, 7, 9, 32), scale=0.1)),
     "pad_4d_dim_3": (3, cached_randn((3, 7, 9, 32), scale=0.1)),
+}
+
+
+# Shapes for the shared-input two-reduction regression (see
+# SHARED_INPUT_TWO_REDUCTION_PAIRS). The reduced dim is deliberately never the
+# trailing one: the hazard needs a *non-trailing* reduction, since only then do
+# the per-core work slices of the shared input carry more than one split dim.
+SHARED_INPUT_TWO_REDUCTION_PARAM_SETS = {
+    # The three geometries whose aminmax cases regressed on 2.13 before the
+    # producer-alignment fix (test_aminmax_keepdim{0,1}_aminmax_pad_{2,3,4}d_dim_0).
+    # Unaligned trailing dims put these on the SDSC padding path.
+    "pad_2d_dim_0": (0, cached_randn((63, 129), scale=0.1)),
+    "pad_3d_dim_0": (0, cached_randn((3, 7, 9), scale=0.1)),
+    "pad_4d_dim_0": (0, cached_randn((3, 7, 9, 32), scale=0.1)),
+    # Stick-aligned trailing dim, so the padding path is not involved.
+    "3d_dim_0": (0, cached_randn((3, 5, 256), scale=0.1)),
+    # Interior dim rather than dim 0, so the split that must agree is not the
+    # outermost one either.
+    "4d_dim_1": (1, cached_randn((6, 7, 12, 256), scale=0.1)),
 }
 
 
@@ -231,6 +253,58 @@ def _get_spyre_mode_support(op):
     )
 
 
+# How an LX-resident buffer appears in generated code, e.g. "allocation={'lx': 0}".
+_LX_ALLOCATION_MARKER = "allocation={'lx'"
+
+
+def _assert_keeps_lx_residency(fn, x, case):
+    """Assert the compiled graph still pins at least one buffer into LX.
+
+    Comparing values cannot detect a regression in
+    ``align_lx_producer_loop_order``: if an LX buffer's producer and consumers
+    stop agreeing on core->slice, ``demote_incoherent_lx_buffers`` clears the LX
+    allocation and the results come out correct anyway -- just served from HBM.
+    Residency is therefore the only observable that separates "aligned" from
+    "demoted", so assert it directly.
+
+    Measured on the shapes in SHARED_INPUT_TWO_REDUCTION_PARAM_SETS: with the
+    aligner in place every case keeps 3 LX allocations (4 for the three-consumer
+    pair); with it removed the pad_* cases drop to 0.
+    """
+    torch._dynamo.reset_code_caches()
+    torch._inductor.codecache.FxGraphCache.clear()
+    _, source_codes = run_and_get_code(
+        torch.compile(fn, dynamic=False), x.to(utils_inductor.DEVICE)
+    )
+    assert source_codes, f"{case}: no generated source captured"
+    assert source_codes[0].count(_LX_ALLOCATION_MARKER) > 0, (
+        f"{case}: no buffer left in LX. The values may still be correct, but an "
+        f"LX buffer whose users disagree on core->slice gets demoted to HBM -- so "
+        f"this is the signature of the producer/consumer loop-order alignment "
+        f"regressing (see align_lx_producer_loop_order, #3374/#3387)."
+    )
+
+
+# Pairs of reductions applied to the *same* input over the same dim. Each pair is
+# built from two separately-dispatched ops rather than from a single fused op such
+# as aminmax, so the graph shape under test survives any change to how a tuple
+# reduction decomposes.
+SHARED_INPUT_TWO_REDUCTION_PAIRS = {
+    # Closest analogue to aminmax, the op that originally surfaced this.
+    "amin_amax": lambda x, dim: (torch.amin(x, dim=dim), torch.amax(x, dim=dim)),
+    # Mixed reduction kinds: an accumulating reduction beside a comparing one.
+    "sum_amax": lambda x, dim: (torch.sum(x, dim=dim), torch.amax(x, dim=dim)),
+    "mean_amin": lambda x, dim: (torch.mean(x, dim=dim), torch.amin(x, dim=dim)),
+    # Three consumers, so a single mismatched pair cannot be masked by the other
+    # two happening to agree.
+    "amin_amax_sum": lambda x, dim: (
+        torch.amin(x, dim=dim),
+        torch.amax(x, dim=dim),
+        torch.sum(x, dim=dim),
+    ),
+}
+
+
 def _compare_op_with_cpu(fn, op, *args, **kwargs):
     support = _get_spyre_mode_support(op)
     if not support["compiled"] and not support["eager"]:
@@ -258,6 +332,8 @@ TO_DTYPE_OP_SHAPES_UNALIGNED = [
     (68,),  # 1D unaligned: 68 > 1 fp16 stick (64 elems), not a multiple of 64
     (4, 16),
     (4, 68),
+    (4, 32),  # exactly 1 fp32 stick -- shape[-1] < 32 check should NOT apply here
+    (4, 63),  # just under 1 fp16 stick, but > 1 fp32 stick (not a multiple of 32)
 ]
 
 TO_DTYPE_OP_SHAPES_ALIGNED = [
@@ -287,7 +363,7 @@ TO_DTYPE_OP_PARAMS_SETS = {
     )
     for src, dst in DtypeOpTable.get_dtype_pairs()
     for shape in TO_DTYPE_OP_SHAPES
-    if src not in (torch.bool, torch.float8_e4m3fn) and dst != torch.bool
+    if src != torch.float8_e4m3fn
 }
 
 
@@ -300,6 +376,7 @@ TO_DTYPE_OP_EXPECT_FAIL = [
     if (
         shape in _DTYPE_OP_ALL_OPS_FAIL_SHAPES
         or DtypeOpTable.get_operator(src, dst) != IDENTITY_OP
+        or (src == torch.float32 and shape[-1] < 32)
     )
 ]
 
@@ -308,15 +385,32 @@ TO_DTYPE_OP_ROUND_TRIP_PARAMS_SETS = {
         cached_randn(shape, dtype=src),
         dst,
     )
-    for src, dst in [(torch.float16, torch.float32)]
+    for src in [torch.float16, torch.float32]
+    for dst in [torch.float16, torch.float32]
+    if src != dst
     for shape in TO_DTYPE_OP_SHAPES
 }
 
 TO_DTYPE_OP_ROUND_TRIP_EXPECT_FAIL = [
     f"{_dtype_name(src)}_to_{_dtype_name(dst)}_{shapes2key((shape,))}"
-    for src, dst in [(torch.float16, torch.float32)]
+    for src in [torch.float16, torch.float32]
+    for dst in [torch.float16, torch.float32]
+    if src != dst
     for shape in TO_DTYPE_OP_SHAPES_UNALIGNED
 ]
+
+TO_DTYPE_REDUCTION_DTYPES = [torch.float16, torch.float32]
+
+TO_DTYPE_REDUCTION_PARAMS_SETS = {
+    f"{_dtype_name(src)}_to_{_dtype_name(dst)}_{shapes2key((shape,))}": (
+        cached_randn(shape, dtype=src),
+        dst,
+    )
+    for src in TO_DTYPE_REDUCTION_DTYPES
+    for dst in TO_DTYPE_REDUCTION_DTYPES
+    if src != dst
+    for shape in TO_DTYPE_OP_SHAPES_ALIGNED
+}
 
 # Mixed element arrangements across a graph boundary: one operand is a native
 # fp32 (STANDARD) input, the other is fp16 upcast to fp32 in-graph (staggered
@@ -362,6 +456,39 @@ TO_DTYPE_OP_MIXED_EA_BROADCAST_PARAMS_SETS = {
     for big, small in [((4, 128), (4, 1)), ((2, 4, 64), (2, 4, 1))]
 }
 
+# M x K x N -> [M, K] @ [K, N]
+_SCALED_MM_SHAPES = [
+    (128, 128, 128),
+    (1, 128, 128),
+    (2, 128, 128),
+    (3, 128, 128),
+    (4, 128, 1024),
+    (1, 4096, 4096),
+    (2, 4096, 4096),
+    (4, 4096, 4096),
+]
+
+# scale_a, scale_b
+_SCALED_MM_PARAMS = [
+    (1.0, 1.0, 0.0),  # unit scales, no bias — baseline
+    (2.0, 1.0, 0.0),  # non-unit scale_a
+    (1.0, 3.0, 0.0),  # non-unit scale_b
+    (2.0, 3.0, 0.0),  # both non-unit scales
+    (1.0, 1.0, 5.0),  # unit scales with bias
+    (2.0, 3.0, 0.5),  # non-unit scales with bias
+]
+
+SCALED_MM_TESTS = {
+    f"{shapes2key([shape])}_{sa}_{sb}_{b}": (
+        torch.rand((shape[0], shape[1]), dtype=torch.float16),
+        torch.rand((shape[1], shape[2]), dtype=torch.float16),
+        torch.tensor(sa, dtype=torch.float16),
+        torch.tensor(sb, dtype=torch.float16),
+        torch.tensor(b, dtype=torch.float16),
+    )
+    for shape in _SCALED_MM_SHAPES
+    for sa, sb, b in _SCALED_MM_PARAMS
+}
 FP32_EPS = torch.finfo(torch.float32).eps  # 1.1920928955078125e-07
 FP16_EPS = torch.finfo(torch.float16).eps  # 0.0009765625
 
@@ -631,6 +758,8 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     ((67, 256),) * 2,
                     ((67, 71, 256),) * 2,
                     ((7, 12, 32, 64),) * 2,
+                    # broadcasting case
+                    ((2880,), (1, 11, 2880)),
                 ]
             ),
         },
@@ -1148,6 +1277,23 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             },
             "param_sets": INDEX_REDUCTION_KEEPDIM_PARAM_SETS,
         },
+        # Regression guard for the LX producer/consumer core->slice agreement
+        # (#3374, #3387). Two device reductions over one LX-pinned input reducing
+        # a non-trailing dim get a positional core->slice mapping from
+        # core_to_slice_mapping; if the clone that pins the input into LX walks it
+        # in a different dim order than the reductions read it, each core reads a
+        # slice another core wrote and the result is silently wrong. Through 2.12
+        # Inductor's loop_ordering_after_fusion happened to rewrite the clone into
+        # the consumers' order; 2.13 computes that reorder and discards it, which
+        # is what exposed it. aminmax was merely the first op to show it, so these
+        # cases assert the general shape.
+        (
+            "test_shared_input_two_reductions",
+            "test_shared_input_two_reductions_base",
+        ): {
+            "ops_dict": SHARED_INPUT_TWO_REDUCTION_PAIRS,
+            "param_sets": SHARED_INPUT_TWO_REDUCTION_PARAM_SETS,
+        },
         ("test_vector_norm_keepdim0", "test_norm_keepdim0_cpu"): {
             "ops_dict": {
                 "vector_norm": torch.linalg.vector_norm,
@@ -1261,6 +1407,28 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 ]
             ),
             "expect_fail": ["49159x4096"],
+        },
+        # Reversal along a non-stick dim works; the stick (last) dim needs a
+        # gather along the stick dimension, which the backend cannot do, and
+        # a rank-1 flip is always a stick-dim flip. Before issue #3558 the
+        # dim-0 cases compiled clean and returned the last slice broadcast
+        # over the whole axis.
+        ("test_flip", "test_flip_cpu"): {
+            "param_sets": {
+                "2d_dim_0": ([0], cached_randn((67, 256))),
+                "2d_dim_neg2": ([-2], cached_randn((67, 256))),
+                "2d_dim_0_aligned": ([0], cached_randn((64, 256))),
+                "3d_dim_0": ([0], cached_randn((3, 5, 256))),
+                "3d_dim_1": ([1], cached_randn((3, 5, 256))),
+                "3d_dim_0_1": ([0, 1], cached_randn((3, 5, 256))),
+                "4d_dim_0_2": ([0, 2], cached_randn((2, 3, 5, 256))),
+                "2d_size1_dim_0": ([0], cached_randn((1, 256))),
+                "2d_no_dims": ([], cached_randn((67, 256))),
+                # Stick-dim reversals: unsupported, but must fail loudly.
+                "2d_dim_1_stick": ([1], cached_randn((67, 256))),
+                "1d_stick": ([0], cached_randn((256,))),
+            },
+            "expect_fail": ["2d_dim_1_stick", "1d_stick"],
         },
         ("test_transpose_2d", "test_transpose_2d_cpu"): {
             "param_sets": {
@@ -3264,6 +3432,167 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "5d": (cached_randn((2, 3, 4, 5, 192), dtype=torch.float16),),
             },
         },
+        ("test_slice_scatter", "test_slice_scatter_cpu"): {
+            "ops_dict": {
+                # Functional slice_scatter into an INTERNAL base (x + 1.0).
+                "internal": lambda dim, start, end, x, src: torch.slice_scatter(
+                    x + 1.0, src, dim, start, end
+                ),
+                # Functional slice_scatter with the GRAPH INPUT as the base
+                # (the mutation is copied back into the placeholder).
+                "graph_input": lambda dim, start, end, x, src: torch.slice_scatter(
+                    x, src, dim, start, end
+                ),
+                # ``copy_`` into a slice view.
+                "view_copy": lambda dim, start, end, x, src: (
+                    base := x + 1.0,
+                    base.narrow(dim, start, end - start).copy_(src),
+                    base,
+                )[-1],
+            },
+            "param_sets": {
+                # Non-stick (non-last) dim: full sticks, no stick offset.
+                "nonstick_3d": (
+                    1,
+                    1,
+                    3,
+                    cached_randn((8, 4, 64)),
+                    cached_randn((8, 2, 64)),
+                ),
+                "nonstick_4d": (
+                    2,
+                    1,
+                    3,
+                    cached_randn((2, 8, 4, 64)),
+                    cached_randn((2, 8, 2, 64)),
+                ),
+                # Stick (last) dim aligned to a full stick (64).
+                "stick_1d": (
+                    0,
+                    0,
+                    64,
+                    cached_randn((128,)),
+                    cached_randn((64,)),
+                ),
+                "stick_2d": (
+                    1,
+                    0,
+                    64,
+                    cached_randn((8, 128)),
+                    cached_randn((8, 64)),
+                ),
+                "stick_3d": (
+                    2,
+                    0,
+                    64,
+                    cached_randn((2, 8, 128)),
+                    cached_randn((2, 8, 64)),
+                ),
+                "stick_4d": (
+                    3,
+                    0,
+                    64,
+                    cached_randn((2, 8, 4, 128)),
+                    cached_randn((2, 8, 4, 64)),
+                ),
+                # Stick (last) dim, offset by a full stick (cols 64:128).
+                "stick_off_1d": (
+                    0,
+                    64,
+                    128,
+                    cached_randn((128,)),
+                    cached_randn((64,)),
+                ),
+                "stick_off_2d": (
+                    1,
+                    64,
+                    128,
+                    cached_randn((8, 128)),
+                    cached_randn((8, 64)),
+                ),
+                "stick_off_4d": (
+                    3,
+                    64,
+                    128,
+                    cached_randn((2, 8, 4, 128)),
+                    cached_randn((2, 8, 4, 64)),
+                ),
+            },
+        },
+        # ``out=`` writes. Torch Inductor only supports a CONTIGUOUS ``out=``
+        # tensor, which for a slice means slicing the outermost dim (dim 0).
+        ("test_slice_scatter_out", "test_slice_scatter_cpu"): {
+            "ops_dict": {
+                # ``out=`` write into a slice view, e.g.
+                # torch.add(a, b, out=base[...]).
+                "out_arg": lambda dim, start, end, x, src: (
+                    base := x + 1.0,
+                    torch.add(src, src, out=base.narrow(dim, start, end - start)),
+                    base,
+                )[-1],
+            },
+            "param_sets": {
+                # dim 0 aligned (start 0), across 1d/2d/3d/4d.
+                "dim0_1d": (
+                    0,
+                    0,
+                    64,
+                    cached_randn((128,)),
+                    cached_randn((64,)),
+                ),
+                "dim0_2d": (
+                    0,
+                    0,
+                    4,
+                    cached_randn((8, 128)),
+                    cached_randn((4, 128)),
+                ),
+                "dim0_3d": (
+                    0,
+                    0,
+                    2,
+                    cached_randn((4, 8, 64)),
+                    cached_randn((2, 8, 64)),
+                ),
+                "dim0_4d": (
+                    0,
+                    0,
+                    2,
+                    cached_randn((4, 8, 2, 64)),
+                    cached_randn((2, 8, 2, 64)),
+                ),
+                # dim 0 offset (start != 0) -- contiguous, nonzero storage
+                # offset, across 1d/2d/3d/4d.
+                "dim0_off_1d": (
+                    0,
+                    64,
+                    128,
+                    cached_randn((128,)),
+                    cached_randn((64,)),
+                ),
+                "dim0_off_2d": (
+                    0,
+                    4,
+                    8,
+                    cached_randn((8, 128)),
+                    cached_randn((4, 128)),
+                ),
+                "dim0_off_3d": (
+                    0,
+                    2,
+                    4,
+                    cached_randn((4, 8, 64)),
+                    cached_randn((2, 8, 64)),
+                ),
+                "dim0_off_4d": (
+                    0,
+                    2,
+                    4,
+                    cached_randn((4, 8, 2, 64)),
+                    cached_randn((2, 8, 2, 64)),
+                ),
+            },
+        },
         ("test_rope_fms", "test_rope_cpu"): {
             "param_sets": {
                 "prefill_bs1": (
@@ -4388,6 +4717,110 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             "param_sets": TO_DTYPE_OP_ROUND_TRIP_PARAMS_SETS,
             "expect_fail": TO_DTYPE_OP_ROUND_TRIP_EXPECT_FAIL,
         },
+        # storage_offset support for graph-input placeholders, non-stick dims.
+        # `slicer` runs after .to("spyre") and before compile, so the offset
+        # lives on the placeholder itself, not an intra-graph slice.
+        ("test_storage_offset_placeholder", "test_storage_offset_placeholder"): {
+            "ops_dict": {
+                "add": lambda x: x + x,
+                "exp": torch.exp,
+                # Asymmetric operands (one fresh clean buffer, one the
+                # offset-bearing placeholder itself) -- regression coverage
+                # for the _multi_arg_pointwise_layouts fallback path, which
+                # doesn't get exercised by symmetric x+x at all.
+                "add_asymmetric": lambda x: x.clone() + x,
+            },
+            "param_sets": {
+                "2d_offset_dim0": (
+                    lambda t: t[1:, :],
+                    cached_randn((5, 128), differentiation="ph_2d_offset0"),
+                ),
+                "3d_offset_dim0": (
+                    lambda t: t[1:, :, :],
+                    cached_randn((5, 4, 128), differentiation="ph_3d_offset0"),
+                ),
+                "3d_offset_dim1": (
+                    lambda t: t[:, 1:, :],
+                    cached_randn((4, 5, 128), differentiation="ph_3d_offset1"),
+                ),
+                "3d_gap_dim1": (
+                    # offset+gap: view [9,192,32] over base [9,256,32]
+                    lambda t: t[:, 32:224, :],
+                    cached_randn((9, 256, 32), differentiation="ph_3d_gap1"),
+                ),
+                # Transpose then slice on dim0 (non-stick). _base is the
+                # pre-transpose tensor, so strides differ and this takes the
+                # offset-only branch (permutation preserved, offset attached).
+                "3d_transposed_then_offset_dim0": (
+                    lambda t: t.transpose(0, 1)[1:, :, :],
+                    cached_randn((5, 3, 128), differentiation="ph_3d_t01_sliced"),
+                ),
+            },
+        },
+        # Non-stick dim offset whose base row length (100) isn't a multiple
+        # of elem_in_stick (64). Flat offset 100 decomposes to a device
+        # stick coordinate of Mod(i1,64)+36 -- genuinely not stick-aligned,
+        # since the device layout pads each row's tail to a partial stick
+        # rather than the row itself landing on a stick boundary. Needs
+        # padding-aware device-coordinate construction, which isn't
+        # implemented yet. Dedicated test (not folded into the ops_dict
+        # cross-product above) so the exact rejection reason can be
+        # pinned, matching test_storage_offset_placeholder_stick_dim_rejected
+        # below.
+        (
+            "test_storage_offset_placeholder_nonstick_row",
+            "test_storage_offset_placeholder_nonstick_row_rejected",
+        ): {
+            "param_sets": {
+                "2d_offset_dim0_nonstick_multiple": (
+                    lambda t: t[1:, :],
+                    cached_randn((4, 100), differentiation="ph_2d_offset0_nonstick"),
+                ),
+            },
+        },
+        # Stick dim, unaligned offset: needs Step 2 (alt-layout, #2750).
+        # Must cleanly fail, not silently misbehave.
+        (
+            "test_storage_offset_placeholder_stick_dim",
+            "test_storage_offset_placeholder_stick_dim_rejected",
+        ): {
+            "param_sets": {
+                "1d_offset": (
+                    lambda t: t[3:],
+                    cached_randn((259,), differentiation="ph_1d_offset"),
+                ),
+                "2d_last_dim_offset": (
+                    lambda t: t[:, 1:],
+                    cached_randn((5, 128), differentiation="ph_2d_last_offset"),
+                ),
+            },
+        },
+        # Stick dim, aligned offset (multiple of 64): works without Step 2,
+        # since Mod(c+64, 64) simplifies to Mod(c, 64).
+        (
+            "test_storage_offset_placeholder_stick_dim_aligned",
+            "test_storage_offset_placeholder",
+        ): {
+            "ops_dict": {
+                "add": lambda x: x + x,
+                "exp": torch.exp,
+                # Asymmetric operands (one fresh clean buffer, one the
+                # offset-bearing placeholder itself) -- regression coverage
+                # for the _multi_arg_pointwise_layouts fallback path, which
+                # doesn't get exercised by symmetric x+x at all.
+                "add_asymmetric": lambda x: x.clone() + x,
+            },
+            "param_sets": {
+                "2d_aligned_stick_offset": (
+                    lambda t: t[:, 64:],
+                    cached_randn((5, 128), differentiation="ph_2d_aligned_stick"),
+                ),
+            },
+        },
+        ("test_round_trip_to_dtype_copy", "test_round_trip_to_dtype_copy_cpu"): {
+            "param_sets": TO_DTYPE_OP_ROUND_TRIP_PARAMS_SETS,
+            "expect_fail": TO_DTYPE_OP_ROUND_TRIP_EXPECT_FAIL,
+        },
         (
             "test_round_trip_to_dtype_implicit",
             "test_round_trip_to_dtype_implicit_cpu",
@@ -4395,6 +4828,13 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             "ops_dict": {"add": torch.add},
             "param_sets": TO_DTYPE_OP_ROUND_TRIP_PARAMS_SETS,
             "expect_fail": TO_DTYPE_OP_ROUND_TRIP_EXPECT_FAIL,
+        },
+        (
+            "test_reduction_with_to_dtype",
+            "test_reduction_with_to_dtype_cpu",
+        ): {
+            "ops_dict": {"sum": torch.sum},
+            "param_sets": TO_DTYPE_REDUCTION_PARAMS_SETS,
         },
         (
             "test_round_trip_to_dtype_implicit_invalid",
@@ -4498,6 +4938,17 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                     (1, 1),
                     64,
                 ),
+            },
+        },
+        ("test_avg_pool2d", "test_avg_pool2d_base"): {
+            "ops_dict": {
+                "k2s2": lambda x: F.avg_pool2d(x, kernel_size=2, stride=2),
+                "k4s4": lambda x: F.avg_pool2d(x, kernel_size=4, stride=4),
+            },
+            "param_sets": {
+                "1x3x8x8": (cached_randn((1, 3, 8, 8)),),
+                "1x3x24x24": (cached_randn((1, 3, 24, 24)),),
+                "2x3x8x8": (cached_randn((2, 3, 8, 8)),),
             },
         },
         ("test_repeat", "test_repeat_cpu"): {
@@ -4617,6 +5068,9 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
                 "4d_dim0": (0, cached_randn((2, 4, 8, 64))),
                 "4d_dim3": (3, cached_randn((2, 4, 8, 64))),
             },
+        },
+        ("test_fp8_scaled_mm", "test_fp8_scaled_mm_cpu"): {
+            "param_sets": SCALED_MM_TESTS,
         },
         (
             "test_multiops_split",
@@ -4746,6 +5200,123 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             b[tiny_value_mask] = FP16_EPS
 
         self.compare_with_cpu(op, a, b)
+
+    def test_storage_offset_placeholder(self, op, slicer, base):
+        # slicer runs after .to("spyre") and before compile, so the
+        # offset lives on the placeholder's FakeTensor, not an intra-graph
+        # slice node. Verified in both compiled and eager modes.
+        cpu_view = slicer(base.clone())
+        expected = op(cpu_view).float()
+
+        dev_view = slicer(base.clone().to("spyre"))
+
+        for mode_name, compile_mode in (("compiled", True), ("eager", False)):
+            result = _compile_and_run(op, [dev_view], "spyre", compile=compile_mode)
+            assert torch.allclose(result.float(), expected, atol=0.1, rtol=0.1), (
+                f"{mode_name}: max abs diff: "
+                f"{(result.float() - expected).abs().max().item()}"
+            )
+
+    def test_storage_offset_placeholder_stick_dim_rejected(self, slicer, base):
+        # Stick-dim placeholder offset: alt-layout retargeting not yet
+        # implemented (#2750), so compile must raise rather than silently
+        # miscompute. No eager arm: compile=False skips the Inductor pass
+        # entirely, so it can't exercise this check.
+        def fn(x):
+            return x + x
+
+        dev_view = slicer(base.clone().to("spyre"))
+
+        with pytest.raises(Exception, match="Unsupported"):
+            _compile_and_run(fn, [dev_view], "spyre", compile=True)
+
+    def test_storage_offset_placeholder_nonstick_row_rejected(self, slicer, base):
+        # Non-stick dim offset whose base row length isn't a multiple of
+        # elem_in_stick: padding-aware device-coordinate construction not
+        # yet implemented, so compile must raise rather than silently
+        # miscompute. No eager arm: compile=False skips the Inductor pass
+        # entirely, so it can't exercise this check.
+        def fn(x):
+            return x + x
+
+        dev_view = slicer(base.clone().to("spyre"))
+
+        with pytest.raises(
+            Exception, match="non-stick-aligned device stick coordinate"
+        ):
+            _compile_and_run(fn, [dev_view], "spyre", compile=True)
+
+    def test_storage_offset_placeholder_vs_internal_equivalence(self):
+        # The same slice, once with the offset baked in BEFORE compile
+        # (placeholder case) and once constructed INSIDE the traced
+        # function (intra-graph case) -- both must produce identical
+        # results for a non-stick-dim offset.
+        def fn_placeholder(x):
+            return x + x
+
+        def fn_intragraph(x):
+            return x[1:] + x[1:]
+
+        t = cached_randn((5, 128), differentiation="ss_ph_equiv")
+        t_dev = t.to("spyre")
+        a_dev = t_dev[1:]
+
+        placeholder_result = _compile_and_run(fn_placeholder, [a_dev], "spyre")
+        intragraph_result = _compile_and_run(fn_intragraph, [t_dev], "spyre")
+
+        assert torch.allclose(
+            placeholder_result.float(), intragraph_result.float(), atol=0.1, rtol=0.1
+        ), (
+            "placeholder-origin and intra-graph-origin views diverged: "
+            f"max abs diff: {(placeholder_result.float() - intragraph_result.float()).abs().max().item()}"
+        )
+
+    def test_storage_offset_placeholder_buffer_reuse(self):
+        # Regression test: make_buffer_reuse must propagate the offset
+        # *delta* between reused buffers, not the old buffer's raw offset
+        # (which double-counts it). `y = x + x` then `y.sum(dim=0)` forces a
+        # differently-shaped buffer to reuse y's offset-carrying allocation
+        # via the reinterpret_tensor_with_layout path.
+        def fn(x):
+            y = x + x
+            return y.sum(dim=0, keepdim=False)
+
+        base = cached_randn((5, 128), differentiation="ph_reuse_offset")
+        dev_view = base.clone().to("spyre")[1:, :]
+        cpu_view = base.clone()[1:, :]
+        expected = fn(cpu_view).float()
+
+        for mode_name, compile_mode in (("compiled", True), ("eager", False)):
+            result = _compile_and_run(fn, [dev_view], "spyre", compile=compile_mode)
+            assert torch.allclose(result.float(), expected, atol=0.1, rtol=0.1), (
+                f"{mode_name}: max abs diff: "
+                f"{(result.float() - expected).abs().max().item()}"
+            )
+
+    def test_storage_offset_placeholder_matmul(self):
+        # mm where the LHS is a non-stick-dim offset-bearing placeholder.
+        # Exercises the two-argument path (offset on x, clean w) that the
+        # symmetric x+x param_sets cannot reach.
+        def fn(x, w):
+            return torch.mm(x, w)
+
+        base = cached_randn((5, 128), differentiation="ph_mm_base")
+        w = cached_randn((128, 64), differentiation="ph_mm_w")
+
+        cpu_view = base.clone()[1:, :]
+        expected = fn(cpu_view, w.clone()).float()
+
+        dev_view = base.clone().to("spyre")[1:, :]
+        dev_w = w.clone().to("spyre")
+
+        for mode_name, compile_mode in (("compiled", True), ("eager", False)):
+            result = _compile_and_run(
+                fn, [dev_view, dev_w], "spyre", compile=compile_mode
+            )
+            assert torch.allclose(result.float(), expected, atol=0.1, rtol=0.1), (
+                f"{mode_name}: max abs diff: "
+                f"{(result.float() - expected).abs().max().item()}"
+            )
 
     def test_binary_op_stick_crossing_last_dim(self):
         """A pointwise binary op whose stick (last) dim spans multiple sticks
@@ -4968,6 +5539,25 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
 
     def test_tuple_reduce_keepdim1_cpu(self, op, dim, x):
         _compare_op_with_cpu(lambda x: op(x, dim=dim, keepdim=True), op, x)
+
+    def test_shared_input_two_reductions_base(self, op, dim, x):
+        """Two or more reductions over one shared input, reducing a non-trailing dim.
+
+        A wrong core->slice agreement shows up as values from another core's
+        slice, so this compares every output element rather than just a shape.
+
+        Compiled path only: LX planning is an Inductor-side pass, and Spyre eager
+        does not implement these reductions (they return NotImplemented).
+
+        Values are only half the guard -- see _assert_keeps_lx_residency for why
+        the LX allocation itself has to be asserted too.
+        """
+
+        def fn(t):
+            return op(t, dim)
+
+        self.compare_with_cpu(fn, x, run_eager=False, cpu_compile=True)
+        _assert_keeps_lx_residency(fn, x, self.id().rsplit(".", 1)[-1])
 
     def test_norm_keepdim0_cpu(self, op, ord, dim, x):
         _compare_op_with_cpu(lambda x: op(x, ord=ord, dim=dim, keepdim=False), op, x)
@@ -5490,6 +6080,13 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
     def test_t_2d_contiguous_cpu(self, x):
         # Note: .contiguous() causes issues with eager mode, see https://github.com/torch-spyre/torch-spyre/issues/1149
         self.compare_with_cpu(lambda x: x.t().contiguous(), x, run_eager=False)
+
+    @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
+    def test_flip_cpu(self, dims, x):
+        # Spyre decomposes aten.flip into index_select gathers with a
+        # descending index (see spyre_flip); the arange building that index
+        # falls back to CPU, hence the filtered FallbackWarning.
+        self.compare_with_cpu(lambda x: torch.flip(x, dims), x)
 
     def test_transpose_2d_cpu(self, dim0: int, dim1: int, x):
         self.compare_with_cpu(lambda x: torch.transpose(x, dim0, dim1), x)
@@ -6166,6 +6763,34 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
 
         self.compare_with_cpu(fn, x, clone_inputs=True, run_eager=False)
 
+    def test_slice_scatter_cpu(self, op, dim, start, end, x, src):
+        """Slice writes lowered by ``lower_slice_scatter``."""
+
+        self.compare_with_cpu(
+            lambda x, src: op(dim, start, end, x, src),
+            x,
+            src,
+            clone_inputs=True,
+            run_eager=False,
+            atol=0.005,
+            rtol=0.005,
+        )
+
+    def test_slice_scatter_step_raises(self):
+        """A strided (non-unit-step) slice_scatter raises Unsupported."""
+
+        def fn(x, src):
+            base = x + 1.0
+            return torch.slice_scatter(base, src, dim=0, start=0, end=128, step=2)
+
+        x = torch.randn(128, 128, dtype=torch.float16, device="spyre")
+        src = torch.randn(64, 128, dtype=torch.float16, device="spyre")
+
+        compiled = torch.compile(fn, backend="inductor", fullgraph=True, dynamic=False)
+        with pytest.raises(Exception) as exc_info:
+            compiled(x, src)
+        assert "step" in str(exc_info.value)
+
     def test_rope_cpu(self, q, freqs):
         def fn(q, freqs):
             B, S, E = q.shape
@@ -6269,6 +6894,21 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             run_eager=False,
         )
 
+    def test_round_trip_to_dtype_copy_cpu(self, s, dst_dtype):
+        d = torch.zeros_like(s, dtype=dst_dtype)
+
+        def fn(d, s):
+            d.copy_(s)
+            return d.to(s.dtype)
+
+        self.compare_with_cpu(
+            fn,
+            d,
+            s,
+            cpu_compile=False,
+            run_eager=False,
+        )
+
     def test_round_trip_to_dtype_cpu(self, op, x, dst_dtype):
         def fn(op, x, dst_dtype):
             y = x.to(dst_dtype)
@@ -6297,6 +6937,19 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             op,
             x,
             y,
+            dst_dtype,
+            cpu_compile=False,
+            run_eager=False,
+        )
+
+    def test_reduction_with_to_dtype_cpu(self, op, x, dst_dtype):
+        def fn(op, x, dst_dtype):
+            return op(x, dtype=dst_dtype)
+
+        self.compare_with_cpu(
+            fn,
+            op,
+            x,
             dst_dtype,
             cpu_compile=False,
             run_eager=False,
@@ -6380,6 +7033,89 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
         assert torch.equal(output_cpu, expected_output), (
             f"Bool conversion failed: got {output_cpu.sum().item()}/{64} True, expected {expected_output.sum().item()}/{64}"
         )
+
+    def test_bool_fp16_src_to_fp32_cpu(self):
+        # A bool produced from an fp16 comparison is physically SEN169_FP16.
+        # Converting it to fp32 must resolve via DL16TOFP32_OP (issue #1482).
+        def fn(x, y):
+            return (x > y).to(dtype=torch.float32)
+
+        x = cached_randn((64,), dtype=torch.float16)
+        y = cached_randn((64,), dtype=torch.float16)
+        self.compare_with_cpu(fn, x, y, cpu_compile=False, run_eager=False)
+
+    def test_bool_fp32_src_to_fp32_cpu(self):
+        # A bool produced from an fp32 comparison is physically IEEE_FP32.
+        # Converting it to fp32 is an identity reinterpret. Asserting on the
+        # op_spec debug log (not just numeric correctness) confirms Spyre
+        # actually emits IDENTITY_OP for this conversion, rather than e.g.
+        # silently falling back to CPU and happening to match.
+        def fn(x, y):
+            return (x > y).to(dtype=torch.float32)
+
+        x = cached_randn((64,), dtype=torch.float32)
+        y = cached_randn((64,), dtype=torch.float32)
+        with self.assertLogs("spyre.inductor.spyre_kernel", level="DEBUG") as logs:
+            self.compare_with_cpu(fn, x, y, cpu_compile=False, run_eager=False)
+        self.assertTrue(
+            any("op_spec: identity," in message for message in logs.output),
+            f"Expected an identity op_spec, got: {logs.output}",
+        )
+
+    def test_bool_fp32_src_to_fp16_cpu(self):
+        # A bool produced from an fp32 comparison is physically IEEE_FP32.
+        # Converting it to fp16 must resolve via FP32TODL16_OP.
+        def fn(x, y):
+            return (x > y).to(dtype=torch.float16)
+
+        x = cached_randn((64,), dtype=torch.float32)
+        y = cached_randn((64,), dtype=torch.float32)
+        self.compare_with_cpu(fn, x, y, cpu_compile=False, run_eager=False)
+
+    def test_bool_host_to_fp32_cpu(self):
+        # Literal repro from issue #1482: a host-created bool tensor (always
+        # physically SEN169_FP16 on device) converted to fp32.
+        def fn(x):
+            return x.to(dtype=torch.float32)
+
+        x = torch.randint(0, 2, (64,), dtype=torch.bool)
+        self.compare_with_cpu(fn, x, cpu_compile=False, run_eager=False)
+
+    def test_bool_host_reshaped_to_fp32_cpu(self):
+        # Same as test_bool_host_to_fp32_cpu, but through a reshape view first.
+        def fn(x):
+            return x.reshape(8, 8).to(dtype=torch.float32)
+
+        x = torch.randint(0, 2, (64,), dtype=torch.bool)
+        self.compare_with_cpu(fn, x, cpu_compile=False, run_eager=False)
+
+    def test_bool_host_to_fp16_cpu(self):
+        # Host-created bool tensors are DMA-copied (always physically
+        # SEN169_FP16 on device, same as test_bool_host_to_fp32_cpu above).
+        # Unlike the fp32 case, converting to float16 resolves via
+        # IDENTITY_OP -- a pure byte copy, no value computation -- so there's
+        # no output-ordering convention for a DMA copy to mismatch against.
+        def fn(x):
+            return x.to(dtype=torch.float16)
+
+        x = torch.randint(0, 2, (64,), dtype=torch.bool)
+        self.compare_with_cpu(fn, x, cpu_compile=False, run_eager=False)
+
+    def test_avg_pool2d_base(self, op, x):
+        # Spyre stores C as the stick (innermost) dim, so the op must see a
+        # physically-NHWC tensor viewed as NCHW.  Pass an NHWC-contiguous input
+        # (its layout is preserved by .to("spyre")) and do the NHWC→NCHW permute
+        # inside fn so the compiled graph carries it — this lets us use the
+        # standard compare_with_cpu harness (cpu fn(x_nhwc) == op(x)).
+        #
+        # run_eager=False: Spyre has no eager avg_pool2d kernel
+        # (aten::avg_pool2d.out is unregistered for the 'spyre' backend), so only
+        # the compiled path is valid for this op.
+        def fn(t):
+            return op(t.permute(0, 3, 1, 2))
+
+        x_nhwc = x.permute(0, 2, 3, 1).contiguous()
+        self.compare_with_cpu(fn, x_nhwc, atol=0.1, rtol=0.1, run_eager=False)
 
     def test_conv2d_cpu(self, x, weight, bias, padding, stride, groups):
         def fn(x, weight, bias, padding, stride, groups):
@@ -6553,7 +7289,40 @@ class TestOps(unittest.TestCase, metaclass=ParameterizedTestMeta):
             run_eager=False,
         )
 
-    @pytest.mark.filterwarnings("ignore::torch_spyre.ops.fallbacks.FallbackWarning")
+    def test_fp8_scaled_mm_cpu(self, a, b, scale_a, scale_b, bias):
+        """Test _scaled_mm with FP8 inputs."""
+
+        def spyre_fn(a, b, scale_a, scale_b, bias):
+            q_a = torch.ops.spyre.quantize_fp8_with_scale(a, scale_a)
+            q_b = torch.ops.spyre.quantize_weight_fp8_with_scale(b, scale_b)
+            return torch.ops.aten._scaled_mm(
+                q_a,
+                q_b,
+                scale_a=scale_a,
+                scale_b=scale_b,
+                bias=bias,
+                out_dtype=torch.float16,
+            )
+
+        def pytorch_fn(a, b, scale_a, scale_b, bias):
+            q_a = (
+                (a / scale_a)
+                .clamp(-448.0, 448.0)
+                .to(torch.float8_e4m3fn)
+                .to(torch.float16)
+            )
+            q_b = (
+                (b / scale_b)
+                .clamp(-448.0, 448.0)
+                .to(torch.float8_e4m3fn)
+                .to(torch.float16)
+            )
+            return (q_a @ q_b) * (scale_a * scale_b) + bias
+
+        compare_with_pytorch(
+            spyre_fn, pytorch_fn, a, b, scale_a, scale_b, bias, atol=0.1, rtol=0.1
+        )
+
     def test_is_nonzero_cpu(self, *args):
         """Test torch.is_nonzero on Spyre tensors"""
         if len(args) == 1:

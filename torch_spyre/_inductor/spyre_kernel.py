@@ -19,7 +19,7 @@ from abc import ABC
 import torch
 import sympy
 
-from torch_spyre._C import DataFormats
+from torch_spyre._C import DataFormats, ElementArrangement
 
 from torch._inductor.codegen.common import (
     CSEVariable,
@@ -36,6 +36,7 @@ from .constants import (
     BATCH_MATMUL_OP,
     BATCH_MATMUL_FP8_OP,
     IDENTITY_OP,
+    POOL_OPS,
     RESTICKIFY_OP,
     SEGMENT_OFFSETS,
     SHARED_WEIGHT_UNIT_BMM_INFO_KEY,
@@ -329,6 +330,10 @@ class SpyreOpFuncs:
         return PointwiseOp("qfp8ch", [x])
 
     @staticmethod
+    def qfp8wt(x):
+        return PointwiseOp("qfp8wt", [x])
+
+    @staticmethod
     def relu(x):
         return PointwiseOp("relufwd", [x])
 
@@ -373,7 +378,15 @@ class SpyreOpFuncs:
         # cannot honor compute-type promotion, so accept and ignore.
         assert dtype != src_dtype
 
-        op = DtypeOpTable.get_operator(src_dtype, dtype)
+        if src_dtype == torch.bool:
+            # A bool's physical format (fp16 vs fp32) depends on how it was
+            # produced, so resolve the op from its propagated device dtype.
+            op = DtypeOpTable.get_bool_src_operator(
+                x.layout.device_layout.device_dtype, dtype
+            )
+        else:
+            op = DtypeOpTable.get_operator(src_dtype, dtype)
+
         if op is None:
             raise Unsupported(f"type conversion from {src_dtype} to {dtype}")
 
@@ -720,6 +733,16 @@ class SpyreKernel(Kernel[CSEVariable]):
         tensor: TensorAccess,
         opspec_name: "str | None" = None,
     ) -> TensorArg:
+        # OpSpec->KTIR needs a stable per-buffer identity for register-threaded
+        # fused intermediates (all arg_index == -1): _buf_id keys on TensorArg.name,
+        # which is serialized into the emitted op-spec literal and read back by
+        # generate_ktir.  The SDSC/flex literal identifies buffers by arg_index +
+        # allocation address and only needs name for gather indices, so populate it
+        # from the buffer name only when the KTIR emitter is enabled
+        # (config.ktir_emitter, i.e. TORCH_SPYRE_KTIR=1) -- leaving the default
+        # SDSC literal byte-identical.
+        if opspec_name is None and _spyre_config.ktir_emitter:
+            opspec_name = name
         it_space = iteration_space(self.current_node)
         # With dynamic=True the host index may contain symbolic strides
         # (e.g. x0*s1+x1).  Concretize size symbols so normalize_coordinates
@@ -749,7 +772,7 @@ class SpyreKernel(Kernel[CSEVariable]):
             tensor.layout.device_layout.device_size,
             device_coords,
             tensor.layout.allocation,
-            per_tile_fixed=getattr(tensor.layout, "per_tile_fixed", False),
+            element_arrangement=tensor.layout.device_layout.element_arrangement,
             name=opspec_name,
             device_tile_advance_expr=device_tile_advance_expr,
         )
@@ -902,6 +925,20 @@ class SpyreKernel(Kernel[CSEVariable]):
                 )
             )
 
+        # Carry the pool node's full logical output ranges (NCHW, incl. unit
+        # dims) so codegen can derive surviving dim roles and the channel count
+        # from live IR instead of a lowering-time size snapshot.  Store raw
+        # ranges (no int(): ranges may be symbolic); consumers convert only
+        # static dims.  Populated only for pools — the only consumer — so
+        # non-pool kernels' generated source is unchanged.
+        node_output_ranges = (
+            tuple(ir_node.data.ranges)
+            if op in POOL_OPS
+            and hasattr(ir_node, "data")
+            and hasattr(ir_node.data, "ranges")
+            else None
+        )
+
         return OpSpec(
             op,
             is_reduction,
@@ -911,6 +948,7 @@ class SpyreKernel(Kernel[CSEVariable]):
             tiled_symbols=tiled_syms,
             tiled_symbol_trip_counts=tiled_symbol_trip_counts,
             symbolic_dim_bounds=symbolic_dim_bounds,
+            node_output_ranges=node_output_ranges,
             debug_handle=debug_handle,
         )
 
@@ -1022,10 +1060,25 @@ class SpyreKernel(Kernel[CSEVariable]):
             )
         elif isinstance(value, TensorAccess):
             # Reshapes, transposes, and other dataops.
-            if self.indirect_vars:
+            # Compute which indirect variables THIS operation actually uses:
+            # - For gather: check source index for indirect symbols
+            # - For scatter: check destination index for indirect symbols
+            # Use the same filtering logic as PointwiseOp to avoid duplication.
+            indirect_syms_used = (
+                _indirect_syms_used(
+                    value,
+                    self.indirect_vars,
+                    src_index=value.index,
+                    dst_index=dst.index,
+                )
+                if self.indirect_vars
+                else set()
+            )
+
+            if indirect_syms_used:
                 # Gather/scatter: coordinates are built with raw indirect symbols here;
                 # indirect_access_subs is applied later in codegen_kernel → simplify_op_spec.
-                # TODO: scatter codegen (IndirectAccess on output TensorArg → SuperDSC) not yet wired up.
+                # Only add the indirect tensors that this specific operation uses.
                 args = [
                     self.create_tensor_arg(
                         True,
@@ -1033,20 +1086,23 @@ class SpyreKernel(Kernel[CSEVariable]):
                         idx_tensor,
                         opspec_name=idx_tensor.name,
                     )
-                    for idx_tensor in sorted(
-                        self.indirect_vars.values(),
-                        key=lambda t: t.name,
-                    )
+                    for sym in sorted(indirect_syms_used, key=str)
+                    for idx_tensor in [self.indirect_vars[sym]]
                 ]
                 args += [
                     self.create_tensor_arg(True, value.name, value),
                     self.create_tensor_arg(False, real_dst_name, dst),
                 ]
+                # Only pass indirect var names that this operation uses
+                op_indirect_var_names = frozenset(
+                    self.indirect_vars[sym].name for sym in indirect_syms_used
+                )
             else:
                 args = [
                     self.create_tensor_arg(True, value.name, value),
                     self.create_tensor_arg(False, real_dst_name, dst),
                 ]
+                op_indirect_var_names = None
             in_coords = args[-2].device_coordinates
             out_coords = args[-1].device_coordinates
             if all(e == 0 for e in in_coords) and not all(e == 0 for e in out_coords):
@@ -1057,7 +1113,7 @@ class SpyreKernel(Kernel[CSEVariable]):
             else:
                 op = IDENTITY_OP
             op_spec = self.create_op_spec(
-                op, False, args, op_info, self.indirect_var_names()
+                op, False, args, op_info, op_indirect_var_names
             )
             self.op_specs.append(op_spec)
         else:
@@ -1234,16 +1290,31 @@ class SpyreKernel(Kernel[CSEVariable]):
 
 
 def _indirect_syms_used(
-    value: "PointwiseOp", indirect_vars: "dict[sympy.Symbol, TensorAccess]"
+    value,
+    indirect_vars: "dict[sympy.Symbol, TensorAccess]",
+    src_index: "sympy.Expr | None" = None,
+    dst_index: "sympy.Expr | None" = None,
 ) -> "set[sympy.Symbol]":
-    """Return the subset of indirect_vars keys that appear in value's argument indices."""
-    return {
-        s
-        for inp in value.arguments
-        if isinstance(inp, TensorAccess)
-        for s in inp.index.free_symbols
-        if s in indirect_vars
-    }
+    """Return the subset of indirect_vars keys that appear in value's indices.
+
+    For PointwiseOp: checks all argument indices (via value.arguments).
+    If src_index is provided (for gather source indices), also checks it.
+    If dst_index is provided (for scatter destination indices), also checks it.
+    """
+    syms = set()
+    if hasattr(value, "arguments"):
+        syms = {
+            s
+            for inp in value.arguments
+            if isinstance(inp, TensorAccess)
+            for s in inp.index.free_symbols
+            if s in indirect_vars
+        }
+    if src_index is not None:
+        syms.update(s for s in src_index.free_symbols if s in indirect_vars)
+    if dst_index is not None:
+        syms.update(s for s in dst_index.free_symbols if s in indirect_vars)
+    return syms
 
 
 def _is_indirect_index_arg(
@@ -1331,6 +1402,18 @@ def _codegen_op_spec_list(specs, buf: IndentedBuffer, sympy_str) -> None:
                 buf.writeline(
                     f"symbolic_dim_bounds={_serialize_value(op_spec.symbolic_dim_bounds)},"
                 )
+                if op_spec.node_output_ranges is not None:
+                    # Must survive the OpSpec -> generated-source -> exec
+                    # round-trip: pool codegen reads it to align dim labels and
+                    # the channel-count fallback.  Ranges are sympy Exprs;
+                    # sympy_str emits eval-able sympify(...) calls.
+                    buf.writeline(
+                        "node_output_ranges=("
+                        + "".join(
+                            sympy_str(r) + ", " for r in op_spec.node_output_ranges
+                        )
+                        + "),"
+                    )
                 if op_spec.debug_handle is not None:
                     # Source-to-kernel provenance must survive the OpSpec ->
                     # generated-source -> exec round-trip. DebugHandle/SourceLoc
@@ -1354,14 +1437,16 @@ def _codegen_op_spec_list(specs, buf: IndentedBuffer, sympy_str) -> None:
                                 + "],"
                             )
                             buf.writeline(f"allocation={arg.allocation!r},")
-                            if arg.per_tile_fixed:
-                                buf.writeline("per_tile_fixed=True,")
                             if arg.name is not None:
                                 buf.writeline(f"name={arg.name!r},")
                             if arg.device_tile_advance_expr is not None:
                                 buf.writeline(
                                     "device_tile_advance_expr="
                                     f"{sympy_str(arg.device_tile_advance_expr)},"
+                                )
+                            if arg.element_arrangement != ElementArrangement.STANDARD:
+                                buf.writeline(
+                                    f"element_arrangement={arg.element_arrangement},"
                                 )
                         buf.writeline("),")
                 buf.writeline("]")

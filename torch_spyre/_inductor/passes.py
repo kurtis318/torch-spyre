@@ -36,6 +36,7 @@ from torch._inductor.ir import Operation
 from torch._inductor.scheduler import BaseSchedulerNode
 
 from .logging_utils import get_inductor_logger
+from .provenance import SpyreGraphTransformObserver, reset_provenance_warnings
 
 from .padding import insert_bmm_padding
 from .temp_passes import (
@@ -55,7 +56,11 @@ from .propagate_hints import (
     collect_spyre_hints,
     recover_spyre_hints,
 )
-from .wsr.propagate_named_dims import propagate_named_dims, assign_dim_hints
+from .wsr.propagate_named_dims import (
+    propagate_named_dims,
+    validate_named_dims,
+    assign_dim_hints,
+)
 from .propagate_layouts import (
     propagate_mutation_layouts,
     propagate_spyre_tensor_layouts,
@@ -78,11 +83,15 @@ from .scratchpad.allocator import (
     scratchpad_planning,
 )
 from .fusion import spyre_fuse_nodes
-from .scheduler import align_lx_producer_loop_order, build_loop_scheduler_nodes
+from .scheduler import (
+    align_lx_producer_loop_order,
+    build_loop_scheduler_nodes,
+    demote_incoherent_lx_buffers,
+)
 from .constants import DEVICE_NAME
 from .deadcode_elimination import deadcode_elimination
 from .dedup_constants import dedup_and_promote_constants
-from .wsr.coarse_tile import coarse_tile
+from .wsr.coarse_tile import coarse_tile_post_stickify, coarse_tile_pre_stickify
 from .split_multi_ops import split_multi_ops, validate_ops
 
 
@@ -154,6 +163,9 @@ class _SpyreGraphPassPipeline(CustomGraphPass):
     def __call__(self, graph: torch.fx.graph.Graph) -> None:
         if not self._has_spyre_device(graph):
             return
+        # FX-graph passes are already observed by upstream Inductor's
+        # GraphTransformObserver (populates node.meta["from_node"]); no Spyre
+        # observer is wrapped here.
         for p in self.passes:
             p(graph)
 
@@ -173,8 +185,17 @@ class _SpyreNodePassPipeline(CustomSchedulerPass):
     def __call__(self, target: list[BaseSchedulerNode]) -> list[BaseSchedulerNode]:
         if not self._has_spyre_device(target):
             return target
+        # This pipeline is a per-compile entry point for the observed passes,
+        # so clear the dedup here so each compile warns afresh.
+        reset_provenance_warnings()
         for pass_fn in self.passes:
-            target = pass_fn(target)
+            name = _get_pass_name(pass_fn)
+            observer = SpyreGraphTransformObserver(target, name, kind="node")
+            with observer:
+                target = pass_fn(target)
+                # Reconcile the returned list while recursively inspecting the
+                # underlying buffers through scheduler get_nodes().
+                observer.target = target
         return target
 
     def uuid(self) -> Any | None:
@@ -261,8 +282,12 @@ class CustomPostFusionPasses(_SpyreNodePassPipeline):
     """
 
     def __init__(self):
-        # HBM-Pool Planning
-        super().__init__([hbm_pool_planning, spyre_fuse_nodes])
+        # demote_incoherent_lx_buffers runs first: it re-checks LX core->slice
+        # coherence now that loop orders are final, and anything it demotes must
+        # still be visible to hbm_pool_planning as an unclaimed intermediate.
+        super().__init__(
+            [demote_incoherent_lx_buffers, hbm_pool_planning, spyre_fuse_nodes]
+        )
 
 
 # Several pre-scheduling steps are config-gated or need arguments beyond the
@@ -285,9 +310,18 @@ def _runs(*passes: Callable) -> Callable[[Callable], Callable]:
 
 @_runs(
     reorder_unhinted_interlopers,
+)
+def _maybe_reorder_unhinted_interlopers(graph: GraphLowering) -> None:
+    """Move unhinted ComputedBuffer ops that interrupt hint-group runs."""
+    if config.ignore_wsr_hints:
+        return
+    reorder_unhinted_interlopers(graph)
+
+
+@_runs(
     hints_to_coarse_tile_groups,
     validate_coarse_tile_groups,
-    coarse_tile,
+    coarse_tile_pre_stickify,
 )
 def _maybe_coarse_tile_hints(graph: GraphLowering) -> None:
     """Hint-driven coarse tiling only.  Runs PRE-stickification.
@@ -297,20 +331,19 @@ def _maybe_coarse_tile_hints(graph: GraphLowering) -> None:
     """
     if config.ignore_wsr_hints:
         return
-    reorder_unhinted_interlopers(graph)
     groups = hints_to_coarse_tile_groups(graph)
     if not groups:
         return
     op_order = {id(op): idx for idx, op in enumerate(graph.operations)}
     groups.sort(key=lambda group: op_order.get(id(group[0][0]), len(op_order)))
     validate_coarse_tile_groups(groups)
-    coarse_tile(graph, groups=groups)
+    coarse_tile_pre_stickify(graph, groups=groups)
 
 
 @_runs(
     span_overflow_groups,
     validate_coarse_tile_groups,
-    coarse_tile,
+    coarse_tile_post_stickify,
 )
 def _maybe_coarse_tile_span_overflow(graph: GraphLowering) -> None:
     """Span-overflow coarse tiling only.  Runs POST-stickification.
@@ -318,6 +351,11 @@ def _maybe_coarse_tile_span_overflow(graph: GraphLowering) -> None:
     Requires FixedTiledLayout (device_layout) on all ops.
     hint-driven groups (hints_to_coarse_tile_groups) are intentionally
     absent: they have already run pre-stickification.
+
+    Uses coarse_tile_post_stickify: layout propagation has already
+    committed every op's device layout by this point, so a read-copy here
+    would only produce an HBM-to-HBM copy with no layout-reconciliation
+    benefit.
     """
     if config.ignore_span_overflow_hints:
         return
@@ -326,9 +364,9 @@ def _maybe_coarse_tile_span_overflow(graph: GraphLowering) -> None:
         return
     # span_overflow_groups is a pure planning step: it decides each op's
     # dim_hints but does not set them.  Apply them now, before
-    # validate_coarse_tile_groups/coarse_tile run, since dim_hints is an
-    # input those consume (via plan_coarse_tile_groups's hint lookups), not
-    # something they produce.
+    # validate_coarse_tile_groups/coarse_tile_post_stickify run, since
+    # dim_hints is an input those consume (via plan_coarse_tile_groups's
+    # hint lookups), not something they produce.
     for op, dim_hints in dim_hint_assignments:
         op.dim_hints = dim_hints  # type: ignore[attr-defined]
     # Compute offset to avoid loop_group_id collision with any hint-driven
@@ -343,7 +381,11 @@ def _maybe_coarse_tile_span_overflow(graph: GraphLowering) -> None:
     op_order = {id(op): idx for idx, op in enumerate(graph.operations)}
     groups.sort(key=lambda group: op_order.get(id(group[0][0]), len(op_order)))
     validate_coarse_tile_groups(groups)
-    coarse_tile(graph, groups=groups, group_idx_offset=group_idx_offset)
+    coarse_tile_post_stickify(
+        graph,
+        groups=groups,
+        group_idx_offset=group_idx_offset,
+    )
 
 
 @_runs(cost_model_matmul_division, work_distribution)
@@ -391,7 +433,9 @@ class CustomPreSchedulingPasses:
             # ranges.  This also dissolves the insert_restickify→hint cross-phase
             # contract (issue #3135).
             propagate_named_dims,
+            validate_named_dims,
             assign_dim_hints,
+            _maybe_reorder_unhinted_interlopers,
             _maybe_coarse_tile_hints,
             #
             # Tensor Layout (Stickification)
@@ -424,22 +468,31 @@ class CustomPreSchedulingPasses:
         if not _operations_have_spyre_device(graph.operations):
             return
 
+        # This pipeline is a per-compile entry point for the observed passes,
+        # so clear the dedup here so each compile warns afresh.
+        reset_provenance_warnings()
+
         if logger.isEnabledFor(logging.INFO):
             logger.info(
                 "BEFORE PRE-SCHEDULING\n%s", format_operations(graph.operations)
             )
 
         for pass_fn in self.passes:
-            t0 = time.perf_counter()
-            pass_fn(graph)
+            pass_name = _get_pass_name(pass_fn)
+            # `graph` is the same object throughout -- passes mutate
+            # `graph.operations` in place -- so before/after reconciliation
+            # is exact here.
+            with SpyreGraphTransformObserver(graph, pass_name, kind="graphlowering"):
+                t0 = time.perf_counter()
+                pass_fn(graph)
+                elapsed_ms = (time.perf_counter() - t0) * 1000
+
             if logger.isEnabledFor(logging.INFO):
                 logger.info(
                     "elapsed %5dms  %s",
-                    (time.perf_counter() - t0) * 1000,
-                    _get_pass_name(pass_fn),
+                    elapsed_ms,
+                    pass_name,
                 )
-
-            pass_name = _get_pass_name(pass_fn)
             if logger.isEnabledFor(logging.DEBUG) and _should_log_pass(pass_name):
                 logger.debug(
                     "AFTER %s\n%s", pass_name, format_operations(graph.operations)

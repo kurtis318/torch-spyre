@@ -54,7 +54,7 @@ from torch._inductor.ir import (
 )
 from torch._inductor.virtualized import V
 
-from .constants import BATCH_MATMUL_OP
+from .constants import BATCH_MATMUL_OP, BATCH_MATMUL_FP8_OP
 from .ir import FixedTiledLayout
 from .logging_utils import get_inductor_logger
 from .pass_utils import (
@@ -151,7 +151,13 @@ def _rebuild_matmul(
     object.__setattr__(reduction, "inner_fn", new_inner_fn)
     # reduction_ranges stays at K; no extension here.
 
-    return replace_computed_buffer_body(op, reduction, operations)
+    return replace_computed_buffer_body(
+        op,
+        reduction,
+        operations,
+        pass_name="insert_bmm_padding",
+        reason="redirect matmul to padded input",
+    )
 
 
 def insert_bmm_padding(graph: GraphLowering) -> None:
@@ -180,7 +186,7 @@ def insert_bmm_padding(graph: GraphLowering) -> None:
         reduction = op.data
         if not isinstance(reduction, Reduction):
             continue
-        if reduction.reduction_type != BATCH_MATMUL_OP:
+        if reduction.reduction_type not in [BATCH_MATMUL_OP, BATCH_MATMUL_FP8_OP]:
             continue
 
         rw = op.get_read_writes()
