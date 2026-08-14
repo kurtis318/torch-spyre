@@ -80,7 +80,7 @@ def generate_bundle(
     specs_list: list = list(specs)
 
     if _spyre_config.validate_op_specs:
-        validate_op_specs(specs_list, stage="after_unrolling")
+        validate_op_specs(specs_list, stage="before_bundle_generation")
     if logger.isEnabledFor(logging.INFO):
         logger.info(
             "OP SPECS FOR BUNDLE GENERATION\n%s",

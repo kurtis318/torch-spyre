@@ -1460,7 +1460,6 @@ def _resolve_copy_back_candidates(operations: list[Operation]) -> None:
         producer_layouts = getattr(producer, "layouts", None)
         if not producer_layouts or target_stl not in producer_layouts:
             continue
-
         # Only elide when the producer has a single unambiguous layout. With
         # multiple candidates the optimizer may not commit to target_stl, so
         # eliding the copy would be incorrect.

@@ -1,4 +1,4 @@
-# Copyright 2025 The Torch-Spyre Authors.
+# Copyright 2026 The Torch-Spyre Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -184,6 +184,7 @@ def _validate_loop_spec(loop: LoopSpec, stage: str, loop_depth: int) -> None:
             stage,
         )
 
+    # Only check concrete counts; symbolic counts are valid (resolved at runtime).
     if isinstance(loop.count, (int, sympy.Integer)):
         if int(loop.count) <= 0:
             raise OpSpecValidationError(
@@ -355,7 +356,9 @@ def _check_args(op_spec: OpSpec, stage: str) -> None:
                 stage,
             )
 
-        if not isinstance(arg.arg_index, int) or arg.arg_index < 0:
+        # arg_index is -1 until assigned during bundle preparation, so only
+        # enforce non-negative at the final stage.
+        if stage == "before_bundle_generation" and arg.arg_index < 0:
             raise OpSpecValidationError(
                 op_spec,
                 f"args[{i}].arg_index must be a non-negative int",

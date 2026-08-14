@@ -12,16 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Inductor test suite conftest — enables OpSpec validation for all tests.
+"""Inductor test suite conftest — ensures OpSpec validation for all tests.
 
-This adds overhead to every compiled-path test but catches invariant violations
-early.  The cost is acceptable for CI; disable via SPYRE_VALIDATE_OP_SPECS=0 if
-profiling test-suite runtime.
+Validation is on by default, but we set the env var explicitly here so tests
+remain covered even if the production default changes in the future.  Disable
+via SPYRE_VALIDATE_OP_SPECS=0 if profiling test-suite runtime.
 """
 
 import os
 
 
 def pytest_configure(config):
-    """Enable OpSpec validation for the inductor test suite."""
+    """Ensure OpSpec validation is enabled for the inductor test suite."""
     os.environ["SPYRE_VALIDATE_OP_SPECS"] = "1"
