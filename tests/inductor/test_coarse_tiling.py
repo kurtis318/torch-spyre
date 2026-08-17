@@ -3772,11 +3772,20 @@ class TestGenerateBundleMlirWithAffineStrides(unittest.TestCase):
             allocation={"hbm": 0x1000},
             device_tile_advance_expr=64 * out,
         )
+        tensor_out = TensorArg(
+            is_input=False,
+            arg_index=1,
+            device_dtype=_FP16,
+            device_size=[2, 64],
+            device_coordinates=[Integer(0), c0],
+            allocation={"hbm": 0x2000},
+            device_tile_advance_expr=64 * out,
+        )
         op = OpSpec(
             op="add",
             is_reduction=False,
             iteration_space={c0: (Integer(128), 1)},
-            args=[tensor_in],
+            args=[tensor_in, tensor_out],
             op_info={},
             tiled_symbols=[[c0]],
             tiled_symbol_trip_counts={c0: 128},
@@ -3789,19 +3798,26 @@ class TestGenerateBundleMlirWithAffineStrides(unittest.TestCase):
             "#map_0 = affine_map<(d0)[s0] -> (s0 + 128*d0)>\n"
             "module {\n"
             "\tfunc.func @sdsc_bundle(%arg_0_base_addr: "
+            "!sdscbundle.input_arg<index>, %arg_1_base_addr: "
             "!sdscbundle.input_arg<index>) {\n"
             "\t\t%arg_0 = sdscbundle.input_arg_extract value from "
             "%arg_0_base_addr : !sdscbundle.input_arg<index> -> index\n"
+            "\t\t%arg_1 = sdscbundle.input_arg_extract value from "
+            "%arg_1_base_addr : !sdscbundle.input_arg<index> -> index\n"
             "\t\t%c0 = arith.constant 0 : index\n"
             "\t\t%c1 = arith.constant 1 : index\n"
             "\t\t%loop_bound_0 = arith.constant 4 : index\n"
             "\t\t%arg_0_slice_offset_4096 = arith.constant 4096 : index\n"
             "\t\t%arg_0_slice_4096 = arith.addi %arg_0, "
             "%arg_0_slice_offset_4096 : index\n"
+            "\t\t%arg_1_slice_offset_8191 = arith.constant 8191 : index\n"
+            "\t\t%arg_1_slice_8191 = arith.addi %arg_1, "
+            "%arg_1_slice_offset_8191 : index\n"
             "\t\tscf.for %i_0 = %c0 to %loop_bound_0 step %c1 {\n"
             "\t\t\t%addr_0 = affine.apply #map_0(%i_0)[%arg_0_slice_4096]\n"
-            '\t\t\tsdscbundle.sdsc_execute (%addr_0) {sdsc_filename="sdsc_0.json",'
-            ' "symbol_ids"=[-2]}\n'
+            "\t\t\t%addr_1 = affine.apply #map_0(%i_0)[%arg_1_slice_8191]\n"
+            "\t\t\tsdscbundle.sdsc_execute (%addr_0, %addr_1) "
+            '{sdsc_filename="sdsc_0.json", "symbol_ids"=[-2, -4]}\n'
             "\t\t}\n"
             "\t\treturn\n"
             "\t}\n"

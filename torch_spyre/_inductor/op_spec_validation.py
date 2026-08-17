@@ -373,6 +373,12 @@ def _check_args(op_spec: OpSpec, stage: str) -> None:
 
 def _check_allocation(op_spec: OpSpec, arg: TensorArg, idx: int, stage: str) -> None:
     """OS-4b: allocation must contain exactly one of hbm/lx/hbm_pool."""
+    # Allocation is populated after op-spec creation: HBM addresses are assigned
+    # in codegen_kernel (after the after_creation/after_simplification hooks),
+    # LX addresses by the scratchpad allocator pass, and hbm_pool by
+    # hbm_pool_planning.  Only enforce at the final stage.
+    if stage != "before_bundle_generation":
+        return
     if not isinstance(arg.allocation, dict):
         raise OpSpecValidationError(
             op_spec,
