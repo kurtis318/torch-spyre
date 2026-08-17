@@ -109,6 +109,8 @@ BINARY_OPS = frozenset(
 
 ALL_KNOWN_OPS = MATMUL_OPS | REDUCTION_OPS | POINTWISE_OPS | DTYPE_OPS | SPECIAL_OPS
 
+VALID_ALLOCATION_KEYS = frozenset({"hbm", "lx", "hbm_pool"})
+
 
 class OpSpecValidationError(ValueError):
     """Raised when an OpSpec invariant is violated."""
@@ -346,20 +348,44 @@ def _check_args(op_spec: OpSpec, stage: str) -> None:
             )
 
         # arg_index is -1 until assigned during bundle preparation, so only
-        # enforce non-negative at the final stage.
+        # enforce non-negative at the final stage.  Pool-allocated args
+        # (hbm_pool) retain arg_index=-1 permanently because they are not
+        # kernel parameters — skip the check for those.
         if stage == "before_bundle_generation" and arg.arg_index < 0:
-            raise OpSpecValidationError(
-                op_spec,
-                f"args[{i}].arg_index must be a non-negative int",
-                f"Got arg_index={arg.arg_index!r}",
-                stage,
-            )
+            if "hbm_pool" not in arg.allocation:
+                raise OpSpecValidationError(
+                    op_spec,
+                    f"args[{i}].arg_index must be a non-negative int",
+                    f"Got arg_index={arg.arg_index!r}",
+                    stage,
+                )
 
-    if not has_output:
+        _check_allocation(op_spec, arg, i, stage)
+
+    if not has_output and op_spec.op in ALL_KNOWN_OPS:
         raise OpSpecValidationError(
             op_spec,
             "OpSpec must have at least one output TensorArg (is_input=False)",
             f"All {len(op_spec.args)} args are inputs",
+            stage,
+        )
+
+
+def _check_allocation(op_spec: OpSpec, arg: TensorArg, idx: int, stage: str) -> None:
+    """OS-4b: allocation must contain exactly one of hbm/lx/hbm_pool."""
+    if not isinstance(arg.allocation, dict):
+        raise OpSpecValidationError(
+            op_spec,
+            f"args[{idx}].allocation must be a dict",
+            f"Got type={type(arg.allocation).__name__}",
+            stage,
+        )
+    keys = set(arg.allocation.keys()) & VALID_ALLOCATION_KEYS
+    if len(keys) != 1:
+        raise OpSpecValidationError(
+            op_spec,
+            f"args[{idx}].allocation must contain exactly one of hbm/lx/hbm_pool",
+            f"Got keys={set(arg.allocation.keys())!r}",
             stage,
         )
 

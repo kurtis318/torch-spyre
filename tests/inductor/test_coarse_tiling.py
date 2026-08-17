@@ -6133,7 +6133,9 @@ class TestGenerateBundleMlirSymbolicArgs(unittest.TestCase):
     def test_non_tensor_arg_symbols_remain_as_constants(self):
         c0 = Symbol("c0")
         op_a = self._make_op_spec_with_hbm_args("a", [0])
-        # op_b: arg_index=-1, pool-allocated (fake returns "pool" kind)
+        # op_b: arg_index=-1, pool-allocated (fake returns "pool" kind).
+        # allocation is hbm_pool to reflect the state after hbm_pool_planning,
+        # which runs before bundle generation in production.
         op_b = OpSpec(
             op="b",
             is_reduction=False,
@@ -6145,7 +6147,7 @@ class TestGenerateBundleMlirSymbolicArgs(unittest.TestCase):
                     device_dtype=_FP16,
                     device_size=[2, 64],
                     device_coordinates=[Integer(0), c0],
-                    allocation={"hbm": 0x0},
+                    allocation={"hbm_pool": 0x0},
                 )
             ],
             op_info={},

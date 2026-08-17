@@ -295,6 +295,53 @@ class TestValidateOpSpecsErrors(unittest.TestCase):
             validate_op_specs([loop], stage="test")
         self.assertIn("LoopSpec count must be positive", str(ctx.exception))
 
+    def test_arg_index_negative_at_bundle_stage_hbm(self):
+        """Non-pool-allocated arg with arg_index=-1 at bundle stage errors."""
+        op = _make_valid_op_spec()
+        op.args[0] = dataclasses.replace(op.args[0], arg_index=-1)
+        with self.assertRaises(OpSpecValidationError) as ctx:
+            validate_op_specs([op], stage="before_bundle_generation")
+        self.assertIn("arg_index must be a non-negative int", str(ctx.exception))
+
+    def test_arg_index_negative_pool_allocated_at_bundle_stage(self):
+        """Pool-allocated arg with arg_index=-1 at bundle stage is valid."""
+        op = _make_valid_op_spec()
+        op.args[0] = dataclasses.replace(
+            op.args[0], arg_index=-1, allocation={"hbm_pool": 0x0}
+        )
+        validate_op_specs([op], stage="before_bundle_generation")
+
+    def test_unknown_op_no_output_passes(self):
+        """Unknown/synthetic ops without output args are valid."""
+        c0 = Symbol("c0")
+        op = OpSpec(
+            op="synthetic_test_op",
+            is_reduction=False,
+            iteration_space={c0: (Integer(128), 1)},
+            args=[_make_tensor_arg(is_input=True, arg_index=0)],
+            op_info={},
+            tiled_symbols=[],
+        )
+        validate_op_specs([op], stage="test")
+
+    def test_allocation_invalid_keys(self):
+        """allocation must contain exactly one of hbm/lx/hbm_pool."""
+        op = _make_valid_op_spec()
+        op.args[0] = dataclasses.replace(op.args[0], allocation={"bad_key": 42})
+        with self.assertRaises(OpSpecValidationError) as ctx:
+            validate_op_specs([op], stage="test")
+        self.assertIn("exactly one of hbm/lx/hbm_pool", str(ctx.exception))
+
+    def test_allocation_multiple_keys(self):
+        """allocation must not contain more than one valid key."""
+        op = _make_valid_op_spec()
+        op.args[0] = dataclasses.replace(
+            op.args[0], allocation={"hbm": 0x1000, "lx": 0x2000}
+        )
+        with self.assertRaises(OpSpecValidationError) as ctx:
+            validate_op_specs([op], stage="test")
+        self.assertIn("exactly one of hbm/lx/hbm_pool", str(ctx.exception))
+
 
 # ---------------------------------------------------------------------------
 # Tests: _is_unimplemented_op duck-type check
