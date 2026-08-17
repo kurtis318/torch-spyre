@@ -612,7 +612,7 @@ def _make_tiled_op_spec() -> OpSpec:
         device_tile_advance_expr=tile_advance_expr,
     )
     return OpSpec(
-        op="add",
+        op="abs",
         is_reduction=False,
         iteration_space={c0: (Integer(128), 1)},
         args=[tensor_in, tensor_out],

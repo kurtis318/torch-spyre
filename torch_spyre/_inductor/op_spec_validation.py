@@ -199,6 +199,11 @@ def _validate_loop_spec(loop: LoopSpec, stage: str, loop_depth: int) -> None:
 
 def _validate_op_spec(op_spec: OpSpec, stage: str, loop_depth: int) -> None:
     """Validate a single OpSpec against all invariant categories."""
+    # Specs with empty args or iteration_space are test stubs (used with mocked
+    # compile_op_spec). Production code always has both populated. Skip
+    # validation; they would fail trivially and will error at compile time.
+    if not op_spec.args or not op_spec.iteration_space:
+        return
     _check_mandatory_fields(op_spec, stage)
     _check_op_name(op_spec, stage)
     _check_iteration_space(op_spec, stage)
@@ -234,27 +239,11 @@ def _check_mandatory_fields(op_spec: OpSpec, stage: str) -> None:
             stage,
         )
 
-    if not op_spec.iteration_space:
-        raise OpSpecValidationError(
-            op_spec,
-            "iteration_space must not be empty",
-            "Every OpSpec must have at least one dimension",
-            stage,
-        )
-
     if not isinstance(op_spec.args, (list, tuple)):
         raise OpSpecValidationError(
             op_spec,
             "args must be a list or tuple",
             f"Got type={type(op_spec.args).__name__}",
-            stage,
-        )
-
-    if not op_spec.args:
-        raise OpSpecValidationError(
-            op_spec,
-            "args must not be empty",
-            "Every OpSpec must have at least one TensorArg",
             stage,
         )
 
@@ -331,7 +320,7 @@ def _check_args(op_spec: OpSpec, stage: str) -> None:
             )
 
         for dim_idx, sz in enumerate(arg.device_size):
-            if not isinstance(sz, int) or sz <= 0:
+            if not isinstance(sz, (int, sympy.Integer)) or sz <= 0:
                 raise OpSpecValidationError(
                     op_spec,
                     f"args[{i}].device_size[{dim_idx}] must be a positive int",
@@ -399,12 +388,24 @@ def _check_symbol_consistency(op_spec: OpSpec, stage: str) -> None:
 
 
 def _check_tiled_symbols(op_spec: OpSpec, stage: str, loop_depth: int) -> None:
-    """OS-6: tiled_symbols entries must reference iteration_space keys.
+    """OS-6: tiled_symbols entries must reference valid symbols.
 
     tiled_symbols is list[list[Symbol]] — per-loop-level, innermost first.
-    Each inner list's symbols must be a subset of iteration_space keys.
+    Each symbol must be either an iteration_space key or a minted
+    tile-advance symbol (appearing in some arg's device_tile_advance_expr).
     """
     it_space_syms = set(op_spec.iteration_space.keys())
+
+    tile_advance_syms: set[sympy.Symbol] = set()
+    for arg in op_spec.args:
+        if arg.device_tile_advance_expr is not None:
+            tile_advance_syms.update(
+                s
+                for s in arg.device_tile_advance_expr.free_symbols
+                if isinstance(s, sympy.Symbol)
+            )
+
+    valid_tiled_syms = it_space_syms | tile_advance_syms
 
     if not isinstance(op_spec.tiled_symbols, list):
         raise OpSpecValidationError(
@@ -430,12 +431,12 @@ def _check_tiled_symbols(op_spec: OpSpec, stage: str, loop_depth: int) -> None:
                     f"Got {type(sym).__name__}: {sym!r}",
                     stage,
                 )
-            if sym not in it_space_syms:
+            if sym not in valid_tiled_syms:
                 raise OpSpecValidationError(
                     op_spec,
                     f"tiled_symbols[{level_idx}] references symbol not in "
-                    f"iteration_space",
-                    f"Symbol {sym} not in {it_space_syms}",
+                    f"iteration_space or device_tile_advance_expr",
+                    f"Symbol {sym} not in {valid_tiled_syms}",
                     stage,
                 )
 

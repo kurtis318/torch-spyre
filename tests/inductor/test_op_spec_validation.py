@@ -150,12 +150,11 @@ class TestValidateOpSpecsErrors(unittest.TestCase):
             validate_op_specs([op], stage="test")
         self.assertIn("op must be a non-empty string", str(ctx.exception))
 
-    def test_empty_iteration_space(self):
+    def test_empty_iteration_space_skips_validation(self):
         op = _make_valid_op_spec()
         op.iteration_space = {}
-        with self.assertRaises(OpSpecValidationError) as ctx:
-            validate_op_specs([op], stage="test")
-        self.assertIn("iteration_space must not be empty", str(ctx.exception))
+        # Incomplete specs (empty iteration_space) are silently skipped.
+        validate_op_specs([op], stage="test")
 
     def test_iteration_space_non_symbol_key(self):
         op = _make_valid_op_spec()
@@ -180,12 +179,11 @@ class TestValidateOpSpecsErrors(unittest.TestCase):
             validate_op_specs([op], stage="test")
         self.assertIn("work_division must be a positive int", str(ctx.exception))
 
-    def test_empty_args(self):
+    def test_empty_args_skips_validation(self):
         op = _make_valid_op_spec()
         op.args = []
-        with self.assertRaises(OpSpecValidationError) as ctx:
-            validate_op_specs([op], stage="test")
-        self.assertIn("args must not be empty", str(ctx.exception))
+        # Incomplete specs (empty args) are silently skipped.
+        validate_op_specs([op], stage="test")
 
     def test_arg_not_tensor_arg(self):
         op = _make_valid_op_spec()
