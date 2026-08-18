@@ -130,6 +130,20 @@ class TestValidateOpSpecsHappyPath(unittest.TestCase):
         op.tiled_symbols = [[_C_ROW]]
         validate_op_specs([op], stage="test")
 
+    def test_tiled_symbol_in_trip_counts_only(self):
+        """Symbol in tiled_symbol_trip_counts but not iteration_space is valid."""
+        op = _make_valid_op_spec()
+        tile_sym = Symbol("_tile_adv_c0_0")
+        op.tiled_symbols = [[tile_sym]]
+        op.tiled_symbol_trip_counts = {tile_sym: 4}
+        validate_op_specs([op], stage="test")
+
+    def test_device_size_zero_allowed(self):
+        """device_size dimension of 0 is valid (FP8 sub-stick layout)."""
+        op = _make_valid_op_spec()
+        op.args[0] = dataclasses.replace(op.args[0], device_size=[2, 0, 64])
+        validate_op_specs([op], stage="after_creation_loop_wrapping")
+
 
 # ---------------------------------------------------------------------------
 # Tests: validate_op_specs — error cases
@@ -228,6 +242,19 @@ class TestValidateOpSpecsErrors(unittest.TestCase):
             validate_op_specs([op], stage="test")
         self.assertIn("symbols not in iteration_space", str(ctx.exception))
 
+    def test_indirect_symbol_allowed_before_simplification(self):
+        """Raw indirect0 symbol passes before IndirectAccess wrapping."""
+        op = _make_valid_op_spec()
+        indirect0 = Symbol("indirect0")
+        bad_arg = _make_tensor_arg(is_input=False, arg_index=2)
+        bad_arg.device_coordinates = [indirect0, _C_ROW, sympy.Mod(_C_COL, 64)]
+        op.args = [
+            _make_tensor_arg(True, 0),
+            _make_tensor_arg(True, 1),
+            bad_arg,
+        ]
+        validate_op_specs([op], stage="after_creation_loop_wrapping")
+
     def test_tiled_symbols_not_in_iteration_space(self):
         op = _make_valid_op_spec()
         foreign_sym = Symbol("foreign")
@@ -308,6 +335,14 @@ class TestValidateOpSpecsErrors(unittest.TestCase):
         op = _make_valid_op_spec()
         op.args[0] = dataclasses.replace(
             op.args[0], arg_index=-1, allocation={"hbm_pool": 0x0}
+        )
+        validate_op_specs([op], stage="before_bundle_generation")
+
+    def test_arg_index_negative_lx_allocated_at_bundle_stage(self):
+        """LX-allocated arg with arg_index=-1 at bundle stage is valid."""
+        op = _make_valid_op_spec()
+        op.args[0] = dataclasses.replace(
+            op.args[0], arg_index=-1, allocation={"lx": 0x0}
         )
         validate_op_specs([op], stage="before_bundle_generation")
 

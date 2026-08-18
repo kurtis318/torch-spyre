@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+import regex
 import sympy
 
 from .logging_utils import get_inductor_logger
@@ -322,10 +323,10 @@ def _check_args(op_spec: OpSpec, stage: str) -> None:
             )
 
         for dim_idx, sz in enumerate(arg.device_size):
-            if not isinstance(sz, (int, sympy.Integer)) or sz <= 0:
+            if not isinstance(sz, (int, sympy.Integer)) or sz < 0:
                 raise OpSpecValidationError(
                     op_spec,
-                    f"args[{i}].device_size[{dim_idx}] must be a positive int",
+                    f"args[{i}].device_size[{dim_idx}] must be a non-negative int",
                     f"Got {sz!r}",
                     stage,
                 )
@@ -349,10 +350,10 @@ def _check_args(op_spec: OpSpec, stage: str) -> None:
 
         # arg_index is -1 until assigned during bundle preparation, so only
         # enforce non-negative at the final stage.  Pool-allocated args
-        # (hbm_pool) retain arg_index=-1 permanently because they are not
-        # kernel parameters — skip the check for those.
+        # (hbm_pool) and LX-allocated args retain arg_index=-1 permanently
+        # because they are not kernel parameters — skip the check for those.
         if stage == "before_bundle_generation" and arg.arg_index < 0:
-            if "hbm_pool" not in arg.allocation:
+            if "hbm_pool" not in arg.allocation and "lx" not in arg.allocation:
                 raise OpSpecValidationError(
                     op_spec,
                     f"args[{i}].arg_index must be a non-negative int",
@@ -408,6 +409,12 @@ def _check_symbol_consistency(op_spec: OpSpec, stage: str) -> None:
                 continue
             free = coord.free_symbols
             invalid_syms = free - it_space_syms
+            # Before simplification, indirect indexing symbols (indirect0,
+            # indirect1, ...) are plain Symbols not yet wrapped in
+            # IndirectAccess — allow them through.
+            invalid_syms = {
+                s for s in invalid_syms if not regex.fullmatch(r"indirect\d+", str(s))
+            }
             if invalid_syms:
                 raise OpSpecValidationError(
                     op_spec,
@@ -437,7 +444,9 @@ def _check_tiled_symbols(op_spec: OpSpec, stage: str, loop_depth: int) -> None:
                 if isinstance(s, sympy.Symbol)
             )
 
-    valid_tiled_syms = it_space_syms | tile_advance_syms
+    valid_tiled_syms = (
+        it_space_syms | tile_advance_syms | set(op_spec.tiled_symbol_trip_counts.keys())
+    )
 
     if not isinstance(op_spec.tiled_symbols, list):
         raise OpSpecValidationError(
