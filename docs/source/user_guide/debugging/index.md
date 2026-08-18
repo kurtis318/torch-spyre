@@ -5,6 +5,7 @@
 :maxdepth: 2
 
 inductor_artifacts
+unified_logging_framework
 ```
 
 **Scope:** correctness — *why is the result wrong?* For performance
