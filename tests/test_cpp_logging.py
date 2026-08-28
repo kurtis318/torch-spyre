@@ -38,14 +38,12 @@ class TestLegacyCppLoggingSilent:
         assert "[DEBUG]" not in result.stdout
 
 
-class TestLegacyEnvVarEnablesDebug:
-    """Verify TORCH_SPYRE_DEBUG=1 enables C++ debug via the legacy shim."""
+class TestTorchSpyreDebugEnvVar:
+    """Verify TORCH_SPYRE_DEBUG=1 enables C++ debug logging."""
 
-    def test_legacy_env_var_enables_debug(self):
+    def test_env_var_enables_debug(self):
         """TORCH_SPYRE_DEBUG=1 must configure spyre.runtime at DEBUG level."""
         script = """
-            import warnings
-            warnings.simplefilter("always")
             import torch  # noqa: F401
             import torch_spyre
             from torch_spyre import logging_config
@@ -58,20 +56,7 @@ class TestLegacyEnvVarEnablesDebug:
         result = _run_subprocess(script, {"TORCH_SPYRE_DEBUG": "1"})
         assert result.returncode == 0, f"Subprocess failed: {result.stderr}"
         assert "LEVEL=DEBUG" in result.stdout
-        assert "SOURCE=legacy:TORCH_SPYRE_DEBUG" in result.stdout
-
-    def test_legacy_env_var_emits_deprecation_warning(self):
-        """TORCH_SPYRE_DEBUG=1 must emit a deprecation warning."""
-        script = """
-            import warnings
-            warnings.simplefilter("always")
-            import torch  # noqa: F401
-            import torch_spyre  # noqa: F401
-        """
-        result = _run_subprocess(script, {"TORCH_SPYRE_DEBUG": "1"})
-        assert result.returncode == 0, f"Subprocess failed: {result.stderr}"
-        combined = result.stdout + result.stderr
-        assert "deprecated" in combined.lower() or "TORCH_SPYRE_DEBUG" in combined
+        assert "SOURCE=env:TORCH_SPYRE_DEBUG" in result.stdout
 
 
 class TestTorchLogsEnablesRuntimeDebug:
@@ -102,7 +87,6 @@ class TestTorchLogsEnablesRuntimeDebug:
         assert "SOURCE=TORCH_LOGS" in result.stdout
         combined = result.stdout + result.stderr
         assert "TORCH_SPYRE_DEBUG" not in combined
-        assert "SPYRE_INDUCTOR_LOG" not in combined
 
     def test_cpp_logging_config_reflects_torch_logs(self):
         """C++ LoggingConfig singleton sees the level set by TORCH_LOGS."""

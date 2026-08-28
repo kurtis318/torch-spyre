@@ -87,10 +87,8 @@ See [Common Recipes](#common-recipes) for more configuration patterns.
 
 The **Unified Logging Framework (ULF)** consolidates all torch-spyre logging
 (Python and C++) behind a hierarchical component system configured via the
-`TORCH_LOGS` environment variable. ULF replaces the legacy
-`SPYRE_INDUCTOR_LOG`, `SPYRE_INDUCTOR_LOG_LEVEL`, and `TORCH_SPYRE_DEBUG`
-variables with a single, per-component configuration that is consistent
-across Python and C++ code paths.
+`TORCH_LOGS` environment variable. ULF provides a single, per-component
+configuration that is consistent across Python and C++ code paths.
 
 A **component** is a dot-separated identifier (e.g.,
 `spyre.inductor.lowering`) that names a logical subsystem within
@@ -106,21 +104,16 @@ logging system; `torch_spyre.*` entries are intercepted, normalized to
 Configuration priority (highest wins):
 
 1. `TORCH_LOGS` environment variable (primary, recommended)
-2. Legacy env vars (deprecated, emit warnings)
+2. Environment variables (`TORCH_SPYRE_DEBUG`, `SPYRE_LOG_FILE`)
 3. Programmatic API (`logging_config.set_log_level(...)`)
 4. Defaults (all components at WARNING)
 
-### Migrating from Legacy Variables
+### Environment Variables
 
-The following legacy environment variables are deprecated and emit warnings
-on use. Migrate to their `TORCH_LOGS` equivalents:
-
-| Old variable | New equivalent |
+| Variable | Effect |
 | --- | --- |
-| `SPYRE_INDUCTOR_LOG=1` | `TORCH_LOGS="torch_spyre.inductor"` (INFO) |
-| `SPYRE_INDUCTOR_LOG_LEVEL=DEBUG` | `TORCH_LOGS="+torch_spyre.inductor"` (DEBUG) |
-| `TORCH_SPYRE_DEBUG=1` | `TORCH_LOGS="+torch_spyre"` (DEBUG) |
-| `SPYRE_LOG_FILE=/path` | `logging_config.set_log_file("/path")` |
+| `TORCH_SPYRE_DEBUG=1` | Sets all Spyre components to DEBUG level |
+| `SPYRE_LOG_FILE=/path` | Redirects Spyre log output to a file |
 
 ---
 
@@ -809,7 +802,7 @@ logging_config.get_effective_config()
 
 # Get source of a component's config
 logging_config.get_config_source("spyre.inductor")
-# → "TORCH_LOGS" | "legacy:SPYRE_INDUCTOR_LOG" | "legacy:TORCH_SPYRE_DEBUG" | "programmatic" | "default"
+# → "TORCH_LOGS" | "env:TORCH_SPYRE_DEBUG" | "programmatic" | "default"
 
 # List all predefined components
 logging_config.list_components()

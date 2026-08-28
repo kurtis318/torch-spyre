@@ -23,7 +23,6 @@ import os
 import sys
 import tempfile
 import types
-import warnings
 from collections.abc import Generator
 from pathlib import Path
 from types import ModuleType
@@ -373,59 +372,31 @@ class TestUnifiedLoggingPatterns(LoggingIsolationMixin):
         assert len(captured.output) == 3
 
 
-class TestLegacyCompatibility(LoggingIsolationMixin):
-    """Tests for the legacy-to-unified logging compatibility layer."""
+class TestEnvVarCompatibility(LoggingIsolationMixin):
+    """Tests for environment variable integration with the unified logging config."""
 
-    def test_legacy_environment_variables_map_to_unified_config(self) -> None:
-        """Verify legacy env vars map into unified config with warnings."""
+    def test_torch_spyre_debug_env_var_maps_to_unified_config(self) -> None:
+        """Verify TORCH_SPYRE_DEBUG maps into unified config without warnings."""
         os.environ.pop("TORCH_LOGS", None)
-        os.environ["SPYRE_INDUCTOR_LOG"] = "1"
-        os.environ["SPYRE_INDUCTOR_LOG_LEVEL"] = "DEBUG"
         os.environ["TORCH_SPYRE_DEBUG"] = "1"
 
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            logging_config, logging_utils = self._reload_logging_modules()
+        logging_config, _ = self._reload_logging_modules()
 
-        messages = [str(w.message) for w in caught]
-        assert logging_config.get_effective_config()["spyre.inductor"] == "DEBUG"
-        assert (
-            logging_config.get_config_source("spyre.inductor")
-            == "legacy:SPYRE_INDUCTOR_LOG"
-        )
         assert logging_config.get_effective_config()["spyre.runtime"] == "DEBUG"
         assert (
             logging_config.get_config_source("spyre.runtime")
-            == "legacy:TORCH_SPYRE_DEBUG"
+            == "env:TORCH_SPYRE_DEBUG"
         )
-        assert any(
-            "SPYRE_INDUCTOR_LOG is deprecated" in message for message in messages
-        )
-        assert any("TORCH_SPYRE_DEBUG is deprecated" in message for message in messages)
 
-        legacy_logger = logging_utils.get_logger("legacy_test")
-        with capture_logs("spyre.inductor.legacy_test", level="DEBUG") as captured:
-            legacy_logger.debug(
-                "DEBUG message (enabled via SPYRE_INDUCTOR_LOG_LEVEL=DEBUG)"
-            )
-            legacy_logger.info("INFO message")
-            legacy_logger.warning("WARNING message")
-
-        assert len(captured.output) == 3
-
-    def test_legacy_log_file_env_var_maps_to_unified_config(self) -> None:
-        """Verify SPYRE_LOG_FILE maps into unified output config with warning."""
+    def test_spyre_log_file_env_var_maps_to_unified_config(self) -> None:
+        """Verify SPYRE_LOG_FILE maps into unified output config without warnings."""
         os.environ["SPYRE_LOG_FILE"] = "/tmp/spyre-legacy.log"
 
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            logging_config, _ = self._reload_logging_modules()
+        logging_config, _ = self._reload_logging_modules()
 
         output_config = logging_config.get_output_config()
         assert output_config["log_file"] == "/tmp/spyre-legacy.log"
-        assert output_config["log_file_source"] == "legacy:SPYRE_LOG_FILE"
-        messages = [str(w.message) for w in caught]
-        assert any("SPYRE_LOG_FILE is deprecated" in message for message in messages)
+        assert output_config["log_file_source"] == "env:SPYRE_LOG_FILE"
 
 
 class TestTorchSpyreNamespaceNormalization(LoggingIsolationMixin):

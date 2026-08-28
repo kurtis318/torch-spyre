@@ -499,7 +499,7 @@ class TestFfdcCollect:
             report = self._collect_to_tmpdir(exc, failure_category=CATEGORY_UNKNOWN)
 
         env = report["environment"]
-        for key in ("TORCH_COMPILE_DEBUG", "TORCH_SPYRE_DEBUG", "SPYRE_INDUCTOR_LOG"):
+        for key in ("TORCH_COMPILE_DEBUG", "TORCH_SPYRE_DEBUG"):
             assert key in env
 
     def test_capture_latency_is_positive(self):
