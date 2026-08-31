@@ -384,8 +384,7 @@ class TestEnvVarCompatibility(LoggingIsolationMixin):
 
         assert logging_config.get_effective_config()["spyre.runtime"] == "DEBUG"
         assert (
-            logging_config.get_config_source("spyre.runtime")
-            == "env:TORCH_SPYRE_DEBUG"
+            logging_config.get_config_source("spyre.runtime") == "env:TORCH_SPYRE_DEBUG"
         )
 
     def test_spyre_log_file_env_var_maps_to_unified_config(self) -> None:
