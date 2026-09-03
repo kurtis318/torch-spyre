@@ -35,6 +35,7 @@ from torch._inductor.ir import Operation
 from torch._inductor.scheduler import BaseSchedulerNode
 
 from . import timing_recorder
+from .graph_validation import validate_graph
 from .logging_utils import get_inductor_logger
 from .pass_counters import COUNTERS
 from .provenance import SpyreGraphTransformObserver, reset_provenance_warnings
@@ -612,6 +613,9 @@ class CustomPreSchedulingPasses:
                 # to the work it describes.
                 event.meta["output_operations"] = len(graph.operations)
                 event.meta.update(COUNTERS.since(pass_counts))
+
+            if config.validate_graph_invariants:
+                validate_graph(graph, pass_name=pass_name)
 
             if logger.isEnabledFor(logging.INFO):
                 logger.info(
