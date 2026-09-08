@@ -975,6 +975,17 @@ def get_matmul_n_size(op: "Operation") -> int:
     return concretize_expr(op.data.ranges[-1])
 
 
+def get_matmul_m_size(op: "Operation") -> int:
+    """Return the concrete M (output rows) extent of a matmul op.
+
+    Reads from op.data.ranges[-2] (the second-to-last non-batch range).
+    Returns 1 when the matmul has fewer than 2 non-batch ranges (degenerate).
+    """
+    if len(op.data.ranges) >= 2:
+        return concretize_expr(op.data.ranges[-2])
+    return 1
+
+
 def find_reduction_var(inputs: Sequence[MemoryDep], out_dep: MemoryDep) -> sympy.Symbol:
     """Return the single input iteration symbol reduced from the output.
 
@@ -1097,12 +1108,14 @@ def find_matmul_generated_var(
     if op is not None and len(generated_vars) > 1:
         generated_vars = generated_vars - broadcast_batch_vars(op, x_dep, out_dep)
         logger.debug("  generated_vars (after broadcast filter) = %s", generated_vars)
-    if len(generated_vars) > 1 and out_dep.var_names:
+    if len(generated_vars) != 1 and out_dep.var_names:
         # The Inductor matmul lowering always places N (the generated/output-column
         # dim) last in ranges — see lower_bmm/lower_mm in lowering.py.  The last
         # squeezed output var is therefore always the generated var.
+        # When generated_vars is empty (self-alias matmul: x and y are the same
+        # buffer, so x_syms swallows the N var), use last_var unconditionally.
         last_var = out_dep.var_names[-1]
-        if last_var in generated_vars:
+        if not generated_vars or last_var in generated_vars:
             generated_vars = {last_var}
             logger.debug(
                 "  generated_vars (after last-output-var fallback) = %s", generated_vars
@@ -2047,7 +2060,12 @@ def compute_restickify_needed(
     outer_axes_with_stick_var = [
         c for c in idc[:-1] if bool(c.free_symbols & stick_syms)
     ]
-    is_factorized = bool(stick_syms) and len(outer_axes_with_stick_var) > 1
+    is_factorized = (
+        _is_matmul_op(op)
+        and in_stl.element_arrangement == ElementArrangement.STANDARD
+        and bool(stick_syms)
+        and len(outer_axes_with_stick_var) > 1
+    )
     factorized_layout_mismatch = is_factorized and in_stl != out_stl
     if (
         not factorized_layout_mismatch
@@ -2056,11 +2074,13 @@ def compute_restickify_needed(
     ):
         return False, None
 
-    # ReStickifyOpHBM currently supports only the native FP16 device format.
+    # ReStickifyOpHBM currently supports only the native FP16 device format
+    # (both logical float16 and bfloat16 map to SEN169_FP16).
     # Do not advertise an edge as feasible when codegen cannot lower it: this
     # is especially important for fp32-upcast graphs, where a later IEEE_FP32
     # restick can otherwise tie with and displace the valid FP16 restick before
-    # the conversion.
+    # the conversion. This also deliberately precedes the factorized-layout
+    # target below: a concrete target is not actionable for a non-DL16 input.
     if in_stl.device_dtype != DataFormats.SEN169_FP16:
         return True, None
 
@@ -2072,7 +2092,6 @@ def compute_restickify_needed(
         # find_stick_compatible_input_layout Pass 3; FixedInOutNode.from_args
         # always passes [req_stl] as the target list, so the beam search only
         # queries this function with that canonical result.
-        assert in_stl.element_arrangement == ElementArrangement.STANDARD
         return True, out_stl
     ic = host_coordinates(in_host, in_dep, ind_sizes)
     target_stick = out_idc[-1]
