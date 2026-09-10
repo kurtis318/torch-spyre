@@ -519,6 +519,7 @@ class CustomPreSchedulingPasses:
                 "BEFORE PRE-SCHEDULING\n%s", format_operations(graph.operations)
             )
 
+        prev_buf_count = len(graph.buffers)
         for pass_fn in self.passes:
             pass_name = _get_pass_name(pass_fn)
             # `graph` is the same object throughout -- passes mutate
@@ -530,7 +531,12 @@ class CustomPreSchedulingPasses:
                 elapsed_ms = (time.perf_counter() - t0) * 1000
 
             if config.validate_graph_invariants:
-                validate_graph(graph, pass_name=pass_name)
+                validate_graph(
+                    graph,
+                    pass_name=pass_name,
+                    prev_buffer_count=prev_buf_count,
+                )
+            prev_buf_count = len(graph.buffers)
 
             if logger.isEnabledFor(logging.INFO):
                 logger.info(

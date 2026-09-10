@@ -148,16 +148,32 @@ class TestGraphValidationHappyPath(unittest.TestCase):
         validate_graph(graph)
 
     def test_pass_name_in_error_messages(self):
-        """pass_name should appear in error messages when provided."""
+        """Multiple violations appear in one exception with pass_name."""
         graph = _enter_fresh_graph(self)
-        buf = _make_buffer("placeholder")
-        _register_buffer(graph, buf)
+        # Violation 1: duplicate buffer names (INV-1)
+        buf1 = _make_buffer("placeholder")
+        _register_buffer(graph, buf1)
         dup_buf = _make_buffer("placeholder")
-        dup_buf.name = buf.get_name()
+        dup_buf.name = buf1.get_name()
         graph.buffers.append(dup_buf)
+        # Violation 2: output referencing undefined buffer (INV-6)
+        mock_output = MagicMock()
+        mock_output.get_name.return_value = "nonexistent_output"
+        graph.graph_outputs = [mock_output]
+
         with self.assertRaises(GraphValidationError) as ctx:
             validate_graph(graph, pass_name="test_pass")
-        self.assertIn("test_pass", str(ctx.exception))
+        err = ctx.exception
+        self.assertIn("test_pass", str(err))
+        self.assertGreaterEqual(len(err.violations), 2)
+        self.assertIn("INV-1", str(err))
+        self.assertIn("INV-6", str(err))
+
+    def test_validate_graph_skips_non_graphlowering(self):
+        """Non-GraphLowering objects should be silently skipped."""
+        mock_graph = MagicMock()
+        mock_graph.operations = []
+        validate_graph(mock_graph)
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +205,45 @@ class TestBufferNameUniqueness(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Tests: Buffer List Immutability (INV-2)
+# ---------------------------------------------------------------------------
+
+
+class TestBufferListImmutability(unittest.TestCase):
+    def setUp(self):
+        self.graph = _enter_fresh_graph(self)
+
+    def test_buffer_removal_detected(self):
+        """Removing a buffer from graph.buffers should be caught by INV-2."""
+        buf = _make_buffer("placeholder")
+        _register_buffer(self.graph, buf)
+        prev_count = len(self.graph.buffers)
+        self.graph.buffers.pop()
+        self.graph.name_to_buffer.pop(buf.get_name(), None)
+
+        with self.assertRaises(GraphValidationError) as ctx:
+            validate_graph(self.graph, prev_buffer_count=prev_count)
+        self.assertIn("INV-2", str(ctx.exception))
+
+    def test_buffer_append_is_valid(self):
+        """Adding buffers should not trigger INV-2."""
+        buf1 = _make_buffer("placeholder")
+        _register_buffer(self.graph, buf1)
+        prev_count = len(self.graph.buffers)
+        buf2 = _make_buffer("placeholder")
+        _register_buffer(self.graph, buf2)
+        validate_graph(self.graph, prev_buffer_count=prev_count)
+
+    def test_no_prev_count_skips_inv2(self):
+        """Without prev_buffer_count, INV-2 is not checked."""
+        buf = _make_buffer("placeholder")
+        _register_buffer(self.graph, buf)
+        self.graph.buffers.pop()
+        self.graph.name_to_buffer.pop(buf.get_name(), None)
+        validate_graph(self.graph)
+
+
+# ---------------------------------------------------------------------------
 # Tests: name_to_buffer Consistency (INV-3)
 # ---------------------------------------------------------------------------
 
@@ -209,17 +264,20 @@ class TestNameToBufferConsistency(unittest.TestCase):
         self.assertIn("name_to_buffer", str(ctx.exception))
 
     def test_stale_name_to_buffer_for_removed_buffer(self):
-        """A removed buffer still in name_to_buffer should be caught."""
+        """A removed buffer still in name_to_buffer is logged, not an error.
+
+        Stale entries are downgraded to logger.debug because some passes
+        (deadcode_elimination, propagate_layouts) add to removed_buffers
+        without cleaning name_to_buffer. Follow-up PR will fix those passes
+        and promote this back to an error.
+        """
         buf = _make_buffer("placeholder")
         name = _register_buffer(self.graph, buf)
         self.graph.removed_buffers.add(name)
-
-        with self.assertRaises(GraphValidationError) as ctx:
-            validate_graph(self.graph)
-        self.assertIn("removed", str(ctx.exception).lower())
+        validate_graph(self.graph)
 
     def test_name_to_buffer_references_wrong_buffer(self):
-        """name_to_buffer entry pointing to wrong buffer object is caught."""
+        """name_to_buffer entry whose buffer name doesn't match the key."""
         buf1 = _make_buffer("placeholder")
         name1 = _register_buffer(self.graph, buf1)
         buf2 = _make_buffer("placeholder")
@@ -228,7 +286,22 @@ class TestNameToBufferConsistency(unittest.TestCase):
 
         with self.assertRaises(GraphValidationError) as ctx:
             validate_graph(self.graph)
-        self.assertIn("name_to_buffer", str(ctx.exception))
+        self.assertIn("does not match", str(ctx.exception))
+
+    def test_replacement_buffer_does_not_trigger_inv3(self):
+        """replace_computed_buffer_body pattern: new object with same name.
+
+        After replace_computed_buffer_body(), name_to_buffer holds a
+        replacement ComputedBuffer while graph.buffers retains the
+        original. As long as the replacement's get_name() matches the
+        dict key, INV-3 must not fire.
+        """
+        buf1 = _make_buffer("placeholder")
+        name = _register_buffer(self.graph, buf1)
+        buf2 = _make_buffer("placeholder")
+        buf2.name = name
+        self.graph.name_to_buffer[name] = buf2
+        validate_graph(self.graph)
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +334,19 @@ class TestNameToOpConsistency(unittest.TestCase):
             validate_graph(self.graph)
         self.assertIn("operation_name", str(ctx.exception))
 
+    def test_name_to_op_identity_mismatch(self):
+        """name_to_op pointing to wrong object should be caught."""
+        buf = _make_buffer("placeholder")
+        _register_and_add_operation(self.graph, buf)
+        op_name = buf.get_operation_name()
+        wrong_op = _make_buffer("placeholder")
+        self.graph.name_to_op[op_name] = wrong_op
+
+        with self.assertRaises(GraphValidationError) as ctx:
+            validate_graph(self.graph)
+        self.assertIn("INV-4", str(ctx.exception))
+        self.assertIn("wrong object", str(ctx.exception))
+
 
 # ---------------------------------------------------------------------------
 # Tests: Reads from Defined Buffers (INV-5)
@@ -289,6 +375,15 @@ class TestReadsFromDefinedBuffers(unittest.TestCase):
         _register_and_add_operation(self.graph, buf)
         self.graph.graph_inputs["input_buf"] = MagicMock()
         mock_rw = _make_read_writes(reads=["input_buf"], writes=[buf.get_name()])
+        buf.get_read_writes = lambda: mock_rw
+        validate_graph(self.graph)
+
+    def test_read_from_constant_is_valid(self):
+        """Reading from a name in graph.constants should not raise."""
+        buf = _make_buffer("placeholder")
+        _register_and_add_operation(self.graph, buf)
+        self.graph.constants["const_buf"] = MagicMock()
+        mock_rw = _make_read_writes(reads=["const_buf"], writes=[buf.get_name()])
         buf.get_read_writes = lambda: mock_rw
         validate_graph(self.graph)
 
@@ -331,6 +426,41 @@ class TestGraphOutputsValid(unittest.TestCase):
         buf = _make_buffer("placeholder")
         _register_buffer(self.graph, buf)
         self.graph.graph_outputs = [buf]
+        validate_graph(self.graph)
+
+
+# ---------------------------------------------------------------------------
+# Tests: name_to_users Consistency (INV-7)
+# ---------------------------------------------------------------------------
+
+
+class TestNameToUsersConsistency(unittest.TestCase):
+    def setUp(self):
+        self.graph = _enter_fresh_graph(self)
+
+    def test_name_to_users_orphan_detected(self):
+        """name_to_users entry for an undefined name should be caught."""
+        self.graph.name_to_users["nonexistent_buf"] = OrderedSet()
+
+        with self.assertRaises(GraphValidationError) as ctx:
+            validate_graph(self.graph)
+        self.assertIn("INV-7", str(ctx.exception))
+        self.assertIn("name_to_users", str(ctx.exception))
+
+    def test_name_to_users_with_valid_entries(self):
+        """name_to_users entries for defined buffers should pass."""
+        buf = _make_buffer("placeholder")
+        name = _register_buffer(self.graph, buf)
+        self.graph.name_to_users[name] = OrderedSet()
+        validate_graph(self.graph)
+
+    def test_name_to_users_with_removed_buffer(self):
+        """name_to_users entries for removed buffers should pass."""
+        buf = _make_buffer("placeholder")
+        name = _register_buffer(self.graph, buf)
+        self.graph.removed_buffers.add(name)
+        self.graph.name_to_buffer.pop(name, None)
+        self.graph.name_to_users[name] = OrderedSet()
         validate_graph(self.graph)
 
 
@@ -383,6 +513,24 @@ class TestGraphValidationErrorAttributes(unittest.TestCase):
     def test_empty_pass_name(self):
         err = GraphValidationError("INV-1", "detail")
         self.assertNotIn("[after", str(err))
+
+    def test_detail_attribute_stored(self):
+        err = GraphValidationError("INV-1", "some detail text")
+        self.assertEqual(err.detail, "some detail text")
+
+    def test_violations_default_empty(self):
+        err = GraphValidationError("INV-1", "detail")
+        self.assertEqual(err.violations, [])
+
+    def test_violations_attribute_stored(self):
+        v1 = GraphValidationError("INV-1", "first")
+        v2 = GraphValidationError("INV-3", "second")
+        err = GraphValidationError(
+            "multiple violations", "2 found", violations=[v1, v2]
+        )
+        self.assertEqual(len(err.violations), 2)
+        self.assertIs(err.violations[0], v1)
+        self.assertIs(err.violations[1], v2)
 
 
 if __name__ == "__main__":
