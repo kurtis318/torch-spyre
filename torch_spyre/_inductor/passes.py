@@ -647,6 +647,7 @@ class CustomPreSchedulingPasses:
     def _run_pass_loop(self, graph: GraphLowering) -> None:
         """Run the pass list. Split out so it gets its own timed region."""
         pipeline = type(self).__name__
+        prev_buf_count = len(graph.buffers)
         for pass_fn in self.passes:
             pass_name = _get_pass_name(pass_fn)
             # `graph` is the same object throughout -- passes mutate
@@ -665,7 +666,12 @@ class CustomPreSchedulingPasses:
                 event.meta["output_operations"] = len(graph.operations)
 
             if config.validate_graph_invariants:
-                validate_graph(graph, pass_name=pass_name)
+                validate_graph(
+                    graph,
+                    pass_name=pass_name,
+                    prev_buffer_count=prev_buf_count,
+                )
+            prev_buf_count = len(graph.buffers)
 
             if logger.isEnabledFor(logging.INFO):
                 logger.info(
