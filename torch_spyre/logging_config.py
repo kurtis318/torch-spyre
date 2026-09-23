@@ -507,7 +507,7 @@ def get_config_source(component: str) -> str:
         component: Component name
 
     Returns:
-        Source name: "TORCH_LOGS", "env:TORCH_SPYRE_DEBUG", "env:SPYRE_LOG_FILE",
+        Source name: "TORCH_LOGS", "env:TORCH_SPYRE_DEBUG",
             "programmatic", or "default"
     """
     if not _initialized:

@@ -491,7 +491,7 @@ class TestCompleteIntegration(LoggingIsolationMixin):
             log_path = os.path.join(tmpdir, "spyre.log")
             logging_config, logging_utils = self._reload_logging_modules()
 
-            assert "legacy:" not in logging_config.get_config_source("spyre.inductor")
+            assert "env:" not in logging_config.get_config_source("spyre.inductor")
             components = logging_config.list_components()
             assert "spyre.inductor" in components
             assert "spyre.execution" in components
