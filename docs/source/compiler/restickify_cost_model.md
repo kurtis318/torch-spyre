@@ -40,12 +40,21 @@ division may differ from the consumer's, so charging the former does not price
 the executed read. The objective uses a non-mutating view of the direct read
 only when the existing address, ownership and loop checks prove copy removal
 valid for **every candidate division**. It then prices the consumer's source
-geometry and omits the removed copy. A failed proof or shared copy preserves the
-original cost view. Sources eligible for input cloning and copies eligible for
+geometry and omits the removed copy. A failed proof, shared copy, or graph-output
+copy preserves the original cost view. Sources eligible for input cloning and copies eligible for
 an additional scratchpad shuffle also retain the original view, since these
 later allocation choices can redirect the read. Allocation still plans the
 original buffers; the late pass remains responsible for validating and performing
 the actual rewrite.
+
+Deferred direct reads retain their committed legal division unless every
+ordinary candidate is both provable and covered by the transport calibration.
+This check uses the allocator's actual input-clone and scratchpad-shuffle
+candidates, not just an isolated operation. If a read must be pinned, rebuild
+that allocation context and recheck the remaining expanded reads. Unsupported
+geometry, disabled pricing, and uncalibrated core counts keep the fixed fallback;
+a supported zero-excess long-burst read is still priced. Existing legality,
+hazard, core-budget, and user-hint restrictions remain in force.
 
 The implementation folds payload into the request-count expression **before**
 CP-SAT integerization. Keeping requests/byte as an intermediate can silently round
@@ -93,7 +102,10 @@ instead of introducing exact-size or preferred-split gates.
 
 Deterministic tests should check geometry extraction, residency handling,
 copy-removal proof failures, and the solver's selected divisions and objective
-values. Hardware timing does not belong in deterministic unit-test assertions.
+values. Exercise candidate construction through the real allocator as well as
+cost expressions over supplied menus: correct prices cannot help when the
+allocator has excluded the alternatives. Hardware timing does not belong in
+deterministic unit-test assertions.
 
 For end-to-end validation, compare full-model runs on the same hardware and
 runtime environment. Hold model weights, dtype, batch size, prompt contents,
@@ -120,7 +132,16 @@ operations and representative model workloads.
 - DL16 source DMA calibration. Fully local transports and other device formats
   remain unchanged. HBM-to-LX uses the same source-request estimate, not a
   separate absolute-latency model.
-- Non-affine/sub-stick accesses are not calibrated. Unsupported core counts are
-  neutral rather than assigned an invented measured rate.
+- Non-affine/sub-stick accesses are not calibrated. For a plain copy, unsupported
+  core counts are neutral rather than assigned an invented measured rate.
+- Every arithmetic op with one input and one output, in any graph, issues the same
+  source requests as a copy, so its read run is priced by the same law
+  (`transport_compute_read`). The price is nonzero only where the per-core run is
+  short (under about 1 KB); a longer run costs nothing extra. Such an op may run
+  on a core count no copy was calibrated at, so it takes the rate of the largest
+  calibrated count not above its own (22 cores stream like 16). This is an
+  assumption, not a measurement; without it a split of the stick axis into
+  128-byte runs costs nothing at an odd count and the planner cannot tell it from
+  a split along rows.
 - Output burst fragmentation and interactions between independent operations in
   a fused bundle are not separately modelled by this term.

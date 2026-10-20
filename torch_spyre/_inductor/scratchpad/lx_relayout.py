@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import collections
 import dataclasses
+from functools import cache
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import cast
@@ -47,6 +48,7 @@ from ..core_mapping import (
 from ..cost_model import OpFeatures, relayout_ns
 from ..dump_cost_model import governing_run_split
 from ..ir import FixedTiledLayout
+from ..loop_info import CoarseTileInfo
 from ..logging_utils import get_inductor_logger
 from ..op_spec import TensorWorkDivision
 from ..padding import is_restickify_op
@@ -65,6 +67,12 @@ from .utils import _op_num_cores
 logger = get_inductor_logger("lx_relayout")
 _DESTINATION_PREFIX = "__spyre_lx_relayout__"
 _REGISTRY = "_spyre_lx_relayout_copies"
+# The current shuffle lowering can need one mandatory L3LU address-bound
+# register per incoming fragment. There are eight LBRs on Spyre. Deeptools
+# does not common these values per core for fully global programs, so a
+# larger gather can fail register initialization even when individual cores
+# need fewer distinct values. Apply this conservative bound before placement.
+_MAX_SHUFFLE_FANIN = 8
 
 
 @dataclasses.dataclass(frozen=True)
@@ -306,9 +314,9 @@ def work_division_from_view(
     n = view.num_cores
     if n is None or n <= 0:
         raise ValueError("LX ownership must carry its physical core domain")
-    physical_splits, slots = dict(view.work_slice_dims), dict(view.core_to_slot)
     if len(device_size) != len(device_coordinates):
         raise ValueError("sizes and coordinates differ in rank")
+    physical_splits, slots = dict(view.work_slice_dims), dict(view.core_to_slot)
     if len(physical_splits) != len(view.work_slice_dims) or len(slots) != len(
         view.core_to_slot
     ):
@@ -524,6 +532,7 @@ def partition_footprint(layout: FixedTiledLayout, view: PerCoreView) -> int:
     )
 
 
+@cache
 def movement_supported(
     source: PerCoreView,
     destination: PerCoreView,
@@ -536,53 +545,77 @@ def movement_supported(
     A complete source may feed uniformly repeated destination slices. Across
     unequal core counts, only even broadcasts (one source per destination) are
     supported. Equal destination slices have identical sources by construction.
+    Incoming fragments must also fit the current shuffle lowering's address
+    register budget; broadcast fan-out does not consume this budget.
     """
-
-    num_cores = source_num_cores
-    source_splits = dict(source.work_slice_dims)
-    destination_splits = dict(destination.work_slice_dims)
-    destination_slices = math.prod(destination_splits.values())
     if (
-        num_cores <= 0
-        or destination_num_cores < num_cores
-        or source.num_cores != num_cores
+        source_num_cores <= 0
+        or destination_num_cores < source_num_cores
+        or source.num_cores != source_num_cores
         or destination.num_cores != destination_num_cores
-        or destination_num_cores % num_cores
-        or math.prod(source_splits.values()) != num_cores
-        or destination_slices <= 0
-        or destination_num_cores % destination_slices
-        or (num_cores == destination_num_cores and source.same_partition(destination))
+        or destination_num_cores % source_num_cores
+        or (
+            source_num_cores == destination_num_cores
+            and source.same_partition(destination)
+        )
     ):
         return False
-    source_map = _core_slices(source, num_cores)
+
+    destination_slices = destination.split_product
+    if (
+        destination_slices <= 0
+        or destination_num_cores % destination_slices
+        or source.split_product != source_num_cores
+    ):
+        return False
+
+    source_map = _core_slices(source, source_num_cores)
+    # Every source slice is present exactly once.
+    if (
+        len({tuple(sorted(row.items())) for row in source_map.values()})
+        != source_num_cores
+    ):
+        return False
+
     destination_map = _core_slices(destination, destination_num_cores)
-    edges = transfer_edges(
-        source_splits, destination_splits, source_map, destination_map
-    )
-    fanout = [sum(src == core for src, _ in edges) for core in range(num_cores)]
-    fanin = [
-        sum(dst == core for _, dst in edges) for core in range(destination_num_cores)
-    ]
     replicas = collections.Counter(
         tuple(sorted(row.items())) for row in destination_map.values()
     )
-    return bool(edges) and all(
-        (
-            # Every source sends to the same number of destination cores.
-            len(set(fanout)) == 1,
-            # Every destination receives from the same number of source cores.
-            len(set(fanin)) == 1,
-            # Every source slice is present exactly once.
-            len({tuple(sorted(row.items())) for row in source_map.values()})
-            == num_cores,
-            # Every distinct destination slice is covered.
-            len(replicas) == destination_slices,
-            # Within one core domain, each slice has equally many copies.
-            num_cores != destination_num_cores or len(set(replicas.values())) == 1,
-            # A larger domain only broadcasts: one source per destination.
-            num_cores == destination_num_cores
-            or (fanout[0] == destination_num_cores // num_cores and fanin[0] == 1),
-        )
+
+    # Every distinct destination slice is covered.
+    if len(replicas) != destination_slices:
+        return False
+    # Within one core domain, each slice has equally many copies.
+    if source_num_cores == destination_num_cores and len(set(replicas.values())) != 1:
+        return False
+
+    source_splits = dict(source.work_slice_dims)
+    destination_splits = dict(destination.work_slice_dims)
+    edges = transfer_edges(
+        source_splits, destination_splits, source_map, destination_map
+    )
+    if not edges:
+        return False
+
+    fanout = [0] * source_num_cores
+    fanin = [0] * destination_num_cores
+    for src, dst in edges:
+        for core in range(source_num_cores):
+            fanout[core] += src == core
+        for core in range(destination_num_cores):
+            fanin[core] += dst == core
+
+    # Every source sends to the same number of destination cores.
+    if len(set(fanout)) != 1:
+        return False
+    # Every destination receives from the same number of source cores.
+    if len(set(fanin)) != 1:
+        return False
+    if max(fanin) > _MAX_SHUFFLE_FANIN:
+        return False
+    # A larger domain only broadcasts: one source per destination.
+    return source_num_cores == destination_num_cores or (
+        fanout[0] == destination_num_cores // source_num_cores and fanin[0] == 1
     )
 
 
@@ -616,18 +649,6 @@ def grouped_gather_rejection(
     if owners < source_num_cores and not _is_matmul_op(consumer):
         return "cannot emit: grouped gather requires a matmul consumer"
     return None
-
-
-def lx_solver_relayout() -> bool:
-    """Whether the configured layout solver decides LX relayouts.
-
-    The committed collector decides them under ``greedy`` (#3439, #3440); the
-    co-optimizing CP-SAT solver decides them itself (#4203). Simulated annealing
-    does not yet (#4425). A function on the solver choice rather than a separate
-    option, so there is nothing to keep in sync and it can be deleted once every
-    solver supports relayouts.
-    """
-    return config.layout_solver in ("greedy", "cpsat")
 
 
 def derive_completed_reduction_routes(
@@ -680,8 +701,8 @@ def derive_completed_reduction_routes(
         )
     # Mask unfinished producers before the common ownership intersection.
     source_map = {group[-1]: source_map[group[-1]] for group in groups.values()}
-    edges = transfer_edges(splits, target, source_map, target_map)
     routes: dict[int, list[int]] = {core: [] for core in sorted(source_map)}
+    edges = transfer_edges(splits, target, source_map, target_map)
     fanins = set()
     for destination_core in range(destination_count):
         writers = [s for s, d in edges if d == destination_core]
@@ -758,18 +779,34 @@ def solver_relayout_edge_context(
     loop-symbol -> extent mappings ``work_division_from_view`` projects into -
     or ``None`` when the edge can never host a relayout.
     """
-    # A coarse-tiled endpoint can never host a relayout. The fitted law has
-    # no loop_trip factor (the committed-path planner already guarantees "a
-    # relayout cannot be inside a coarse-tiling loop"), a tiled producer's
-    # buffer is per-tile scratch rather than the full tensor, and a tiled
-    # consumer reads cross-group data through a per-iteration staging op.
-    # The MutationLayout check below only screens the loop's DRAIN op; the
-    # staging and tiled compute ops are plain Pointwise buffers, so the
-    # loop_info presence is the reliable marker.
+    # A coarse-tiled endpoint can usually never host a relayout: a tiled
+    # consumer in general reads cross-group data through a per-iteration
+    # staging op a relayout can't account for. That doesn't apply when
+    # producer and consumer share the exact same loop_group_id -- same
+    # iteration, same tile, direct read, no staging op between them -- so
+    # that one case is let through, unless the consumer is already a
+    # restickify under read-copy-elision's own deferred direct-read handling
+    # (the same marker _distribute_work's division gate checks): that
+    # mechanism already owns this edge's placement, so relayout must not
+    # also offer a candidate for it. The fitted relayout law still prices
+    # one tile's worth; _cd_parent_relayouts (allocator.py) scales that by
+    # the parent's own loop trip count before handing a same-group candidate
+    # to the solver, so a repeated shuffle is priced at its real total cost,
+    # not once.
+    producer_loop_info = getattr(producer, "loop_info", None)
+    consumer_loop_info = getattr(consumer, "loop_info", None)
+    same_tile_group = (
+        isinstance(producer_loop_info, CoarseTileInfo)
+        and isinstance(consumer_loop_info, CoarseTileInfo)
+        and producer_loop_info.loop_group_id == consumer_loop_info.loop_group_id
+        and not (
+            hasattr(consumer, "_read_copy_elision_record")
+            and is_restickify_op(consumer, graph)
+        )
+    )
     if (
-        getattr(producer, "loop_info", None) is not None
-        or getattr(consumer, "loop_info", None) is not None
-    ):
+        producer_loop_info is not None or consumer_loop_info is not None
+    ) and not same_tile_group:
         return None
     if (
         not isinstance(producer, ComputedBuffer)
@@ -859,12 +896,12 @@ def solver_relayout_pair_cost(
     cores_used gates guarantee that, and ``_core_slices`` asserts it rather
     than tolerating an out-of-range slot.
     """
+    run_elems, split = governing_run_split(source_view, destination_view, device_dims)
+    if run_elems <= 0 or not 2 <= split <= 8:
+        return None
     if not movement_supported(
         source_view, destination_view, num_cores, destination_num_cores or num_cores
     ):
-        return None
-    run_elems, split = governing_run_split(source_view, destination_view, device_dims)
-    if run_elems <= 0 or not 2 <= split <= 8:
         return None
     features = OpFeatures(
         name="lx_relayout",
@@ -1001,20 +1038,19 @@ def collect_lx_relayout_plans(
             view, _, representable = _per_core_view_on_buf(
                 consumer, dep, source_name, cache
             )
-            consumer_num_cores = _op_num_cores(consumer)
             # A split reduction makes the consumer's output partial, not its input.
             if view is None or not representable:
                 rejection_reason = (
                     "cannot represent: consumer ownership is unrepresentable"
                 )
                 break
+            consumer_num_cores = _op_num_cores(consumer)
             if reduction is None:
                 rejection_reason = core_domain_rejection(
                     source_num_cores, consumer_num_cores
                 )
                 if rejection_reason is not None:
                     break
-            is_matmul = _is_matmul_op(consumer)
             consumer_coordinates = try_device_coordinates(
                 producer.layout.device_layout, dep, None
             )
@@ -1023,9 +1059,9 @@ def collect_lx_relayout_plans(
                     "cannot represent: consumer coordinates are unavailable"
                 )
                 break
-            consumer_space = iteration_space_from_op(consumer)
             if reduction is None and view.same_partition(source_view):
                 continue
+            is_matmul = _is_matmul_op(consumer)
             if is_matmul and len(deps) != 2:
                 rejection_reason = (
                     "cannot emit: matmul consumer does not have two inputs"
@@ -1043,13 +1079,12 @@ def collect_lx_relayout_plans(
                 )
                 if rejection_reason is not None:
                     break
-            destination_owners = math.prod(dict(view.work_slice_dims).values())
             if consumer_num_cores > source_num_cores:
                 failure = (
                     "cannot emit: grouped destination does not evenly "
                     "broadcast the source"
                 )
-            elif reduction is None and destination_owners < source_num_cores:
+            elif reduction is None and view.split_product < source_num_cores:
                 failure = (
                     "cannot emit: grouped destination does not evenly contract "
                     "the source"
@@ -1078,6 +1113,7 @@ def collect_lx_relayout_plans(
             if not supported:
                 rejection_reason = failure
                 break
+            consumer_space = iteration_space_from_op(consumer)
             transfers.append(
                 (consumer_name, consumer_coordinates, consumer_space, view, routes)
             )

@@ -141,6 +141,7 @@ def test_residency_dtype_and_unknown_geometry():
         replace(op, transport_tile_elems=0),
         replace(op, cores=3),
     ):
+        assert not cm.transport_dma_cost_available(candidate, p)
         assert cm._transport_dma_excess_ns([candidate], p) == 0
     args = [replace(op.args[0], is_lx=True), op.args[1]]
     assert cm._transport_dma_excess_ns([replace(op, args=args)], p) == 0
@@ -153,6 +154,104 @@ def test_residency_dtype_and_unknown_geometry():
         cm._transport_dma_excess_ns([op], replace(p, transport_dma_ns_per_request={}))
         == 0
     )
+
+
+def _activation(cores, run, elems=512 * 704, trips=128):
+    """A one-input, one-output arithmetic op reading ``run`` contiguous bytes per core."""
+    return cm.OpFeatures(
+        name="gelu",
+        is_reduction=False,
+        out_elems=elems,
+        cores=cores,
+        dtype_bytes=2,
+        loop_trip=trips,
+        transport_read_run_bytes=run,
+        transport_tile_elems=elems,
+        transport_compute_read=True,
+        args=[
+            cm.ArgTraffic("in", "input", False, elems, loop_factor=trips),
+            cm.ArgTraffic("out", "output", True, elems, loop_factor=trips),
+        ],
+    )
+
+
+def test_compute_read_prices_a_stick_split_at_an_uncalibrated_count():
+    """An activation over [512 rows, 11 stick planes] reads HBM once.
+
+    Eight row-slices read 90 KB runs; splitting the stick axis 11 ways (2 x 11 = 22
+    cores) shrinks the run to one 128 B stick. Both choices used to cost the same:
+    the law skipped arithmetic ops, and 22 is not a calibrated copy count.
+    """
+    p = cm.CostParams()
+    elems, trips = 512 * 704, 128
+    rows8, sticks22 = _activation(8, 90112), _activation(22, 128)
+    assert cm.transport_dma_cost_available(sticks22, p)
+    assert cm._transport_dma_excess_ns([rows8], p) == 0
+    payload = elems * 2
+    per_trip = (payload / 128) * p.transport_dma_ns_per_request[16]
+    per_trip -= payload / p.bw_peak_gbps
+    assert float(cm._transport_dma_excess_ns([sticks22], p)) == pytest.approx(
+        per_trip * trips
+    )
+    # A plain copy never runs at an uncalibrated count, so it stays unpriced there.
+    copy = replace(sticks22, transport_compute_read=False)
+    assert not cm.transport_dma_cost_available(copy, p)
+    assert cm._transport_dma_excess_ns([copy], p) == 0
+    # The solver sees the same choice through the symbolic core count.
+    cores = sympy.Symbol("cores", integer=True, positive=True)
+    expr = cm._transport_dma_excess_ns([replace(sticks22, cores=cores)], p)
+    assert float(expr.subs(cores, 22)) == pytest.approx(per_trip * trips)
+    assert expr.subs(cores, 16) == expr.subs(cores, 22)
+    assert 0 < expr.subs(cores, 32) < expr.subs(cores, 22)
+
+
+@pytest.mark.parametrize("cores", [16, 22])
+def test_arithmetic_transport_replaces_the_general_read_burst_charge(cores):
+    """The request estimate has one owner after enabling arithmetic transport."""
+    p = cm.CostParams()
+    op = _activation(cores, 128)
+    op = replace(op, args=[replace(op.args[0], read_run_bytes=128), op.args[1]])
+    payload = op.transport_tile_elems * op.dtype_bytes
+    expected = op.loop_trip * (
+        payload / 128 * p.transport_dma_ns_per_request[16] - payload / p.bw_peak_gbps
+    )
+    assert cm._transport_dma_excess_ns([op], p) == pytest.approx(expected)
+    assert cm._read_burst_excess_ns([op], p) == 0
+
+    # Without transport geometry, the general burst path retains its calibrated
+    # counts only. The arithmetic extension at 22 cores is an explicit assumption.
+    general = replace(op, transport_read_run_bytes=None, transport_tile_elems=None)
+    assert cm._transport_dma_excess_ns([general], p) == 0
+    assert cm._read_burst_excess_ns([general], p) == pytest.approx(
+        expected if cores == 16 else 0
+    )
+
+
+def test_a_mixed_bundle_prices_only_the_arithmetic_read_at_an_uncalibrated_count():
+    """One bundle holding a plain copy, an arithmetic op and a matmul. At 22 cores the
+    copy is unpriced (no copy was calibrated there) and the matmul has no source-run
+    geometry, so only the arithmetic op contributes; at a calibrated count the copy
+    is priced too and the bundle is the sum of its members."""
+    p = cm.CostParams()
+    gelu = _activation(22, 128)
+    copy = replace(gelu, name="copy", transport_compute_read=False)
+    matmul = replace(
+        gelu,
+        name="mm",
+        is_matmul=True,
+        transport_read_run_bytes=None,
+        transport_tile_elems=None,
+        transport_compute_read=False,
+    )
+    alone = cm._transport_dma_excess_ns([gelu], p)
+    assert alone > 0
+    assert cm._transport_dma_excess_ns([copy, gelu, matmul], p) == alone
+    gelu16, copy16 = replace(gelu, cores=16), replace(copy, cores=16)
+    both = cm._transport_dma_excess_ns([copy16, gelu16, matmul], p)
+    assert both == cm._transport_dma_excess_ns(
+        [copy16], p
+    ) + cm._transport_dma_excess_ns([gelu16], p)
+    assert cm._transport_dma_excess_ns([copy16], p) > 0
 
 
 def test_staging_copy_keeps_the_source_request_cost():
@@ -190,6 +289,7 @@ def test_copy_only_control(sb, sx, observed_us):
 
 def test_long_contiguous_read_has_no_request_surcharge():
     op = replace(restickify(), transport_read_run_bytes=32768)
+    assert cm.transport_dma_cost_available(op, cm.CostParams())
     assert cm._transport_dma_excess_ns([op], cm.CostParams()) == 0
 
 
@@ -220,7 +320,7 @@ def test_serialization_defaults_and_roundtrip():
 @pytest.mark.parametrize("n,trips", [(1024, 1), (1024, 128), (16384, 1)])
 def test_symbolic_cpsat_picks_measured_fast_division(n, trips):
     cp_model = pytest.importorskip("ortools.sat.python.cp_model")
-    from torch_spyre._inductor.scratchpad.ilp_solver_ortools import _SympyExprToCpSat
+    from torch_spyre._inductor.scratchpad.cpsat_expr_printer import _SympyExprToCpSat
 
     sb, sx = sympy.symbols("split_b split_x", integer=True, positive=True)
     expr = sympy.sympify(cm.predict_ops([restickify(sb, sx, n=n, trips=trips)]))
@@ -345,6 +445,7 @@ def staged_transport_graph():
             graph.name_to_buffer[op.get_name()] = op
         graph.graph_inputs = {"input": source}
         graph.graph_input_names = ["input"]
+        graph.graph_outputs = []
         graph.operations = [stage, consumer]
         for op in (stage, consumer):
             op.operation_name = op.get_name()
@@ -407,6 +508,7 @@ def test_proven_direct_read_is_priced_with_consumer_splits(staged_transport_grap
         "validation",
         "disabled",
         "shared",
+        "graph_output",
         "source_placement",
         "relayout",
     ],
@@ -439,6 +541,8 @@ def test_projection_declines_without_a_universal_proof(
         divisions["input"] = [{}]
     elif failure == "relayout":
         relayout_sources = ("stage",)
+    elif failure == "graph_output":
+        graph.graph_outputs = [stage]
     else:
         monkeypatch.setattr(rce, "_copy_readers", lambda *args: [consumer, consumer])
     assert rce.project_transport_read_copies(
@@ -447,3 +551,157 @@ def test_projection_declines_without_a_universal_proof(
         stage,
         consumer,
     ]
+
+
+def test_real_allocator_keeps_proven_priced_direct_read_candidates(
+    staged_transport_graph,
+):
+    from torch_spyre._inductor import config
+    from torch_spyre._inductor.pass_utils import (
+        commit_iteration_space_ownership,
+        iteration_space_from_op,
+    )
+    from torch_spyre._inductor.scratchpad.allocator import CoOptimizingAllocator
+    from torch_spyre._inductor.scratchpad.ilp_solver_ortools import CpSatLayoutSolver
+
+    graph, stage, consumer = staged_transport_graph
+    b, x, n = iteration_space_from_op(consumer)
+    committed = {b: 8, x: 2, n: 1}
+    commit_iteration_space_ownership(consumer, committed)
+    original_body = consumer.data
+    original_ownership = consumer.iteration_space_ownership
+    allocator = CoOptimizingAllocator(CpSatLayoutSolver, size=2**20)
+    ordinary, _ = allocator._enumerate_core_divisions(consumer, config.sencores)
+    assert len(ordinary) > 1
+    # No hand-built menu: go through the same candidate, clone and relayout
+    # construction as the real joint solve.
+    buffers = allocator._prepare_buffers(graph)
+    actual = next(buf for buf in buffers if buf.name == consumer.name)
+    assert actual.core_divisions == ordinary
+    solver = CpSatLayoutSolver(buffers, allocator.size)
+    result = allocator._solve(solver, graph)
+    selected = next(buf for buf in result if buf.name == consumer.name)
+    chosen = selected.core_divisions[selected.chosen_division]
+    direct = allocator._pricing_operations(graph, buffers)[0]
+    costs = [
+        cm._transport_dma_excess_ns(
+            [dcm.extract_op_features(direct, splits)], cm.CostParams()
+        )
+        for splits in (chosen.splits, committed)
+    ]
+    assert float(costs[0]) < float(costs[1])
+    assert consumer.data is original_body
+    assert consumer.iteration_space_ownership is original_ownership
+    assert graph.operations == [stage, consumer]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "disabled_pricing",
+        "core_budget",
+        "unsupported_core_count",
+        "unknown_geometry",
+        "one_candidate",
+        "graph_output",
+        "shared_reader",
+        "disabled_elision",
+        "hint",
+        "source_clone",
+        "relayout",
+    ],
+)
+def test_real_allocator_pins_unproved_or_unpriced_direct_reads(
+    staged_transport_graph, monkeypatch, failure
+):
+    from torch._inductor.ir import ComputedBuffer
+    from torch_spyre._inductor import config, read_copy_elision as rce
+    from torch_spyre._inductor.pass_utils import (
+        commit_iteration_space_ownership,
+        iteration_space_from_op,
+    )
+    from torch_spyre._inductor.scratchpad import allocator as am
+    from torch_spyre._inductor.scratchpad.ilp_solver_ortools import CpSatLayoutSolver
+
+    graph, stage, consumer = staged_transport_graph
+    b, x, n = iteration_space_from_op(consumer)
+    commit_iteration_space_ownership(consumer, {b: 8, x: 2, n: 1})
+    if failure in ("disabled_pricing", "core_budget"):
+        monkeypatch.setattr(
+            am,
+            "_COST_PARAMS",
+            replace(am._COST_PARAMS, transport_dma_ns_per_request={}),
+        )
+        if failure == "core_budget":
+            monkeypatch.setattr(config, "sencores", 8)
+    elif failure == "unsupported_core_count":
+        rates = dict(am._COST_PARAMS.transport_dma_ns_per_request)
+        del rates[2]
+        monkeypatch.setattr(
+            am,
+            "_COST_PARAMS",
+            replace(am._COST_PARAMS, transport_dma_ns_per_request=rates),
+        )
+    elif failure == "unknown_geometry":
+        monkeypatch.setattr(dcm, "_transport_read_geometry", lambda *args: (None, None))
+    elif failure == "one_candidate":
+        proof = rce._prove_matmul_direct_read
+
+        def prove(op, *args):
+            if op.iteration_space_ownership.work_slices.get(b, 1) == 2:
+                return None, "unsupported candidate"
+            return proof(op, *args)
+
+        monkeypatch.setattr(rce, "_prove_matmul_direct_read", prove)
+    elif failure == "graph_output":
+        graph.graph_outputs = [stage]
+    elif failure == "shared_reader":
+        other = ComputedBuffer(name="other", layout=consumer.layout, data=consumer.data)
+        other.operation_name = "other"
+        other.loop_info = consumer.loop_info
+        commit_iteration_space_ownership(other, {b: 8, x: 2, n: 1})
+        graph.operations.append(other)
+        graph.name_to_buffer[other.name] = other
+    elif failure == "disabled_elision":
+        monkeypatch.setattr(config, "read_copy_elision", False)
+    elif failure == "hint":
+        monkeypatch.setattr(config, "ignore_work_division_hints", False)
+        monkeypatch.setattr(am, "has_resolved_work_div_hint", lambda op: op is consumer)
+    allocator = am.CoOptimizingAllocator(CpSatLayoutSolver, size=2**20)
+    if failure in ("source_clone", "relayout"):
+        from torch_spyre._inductor.scratchpad.plan_solver import (
+            CoreDivision,
+            CoreDivisionBuffer,
+            RelayoutCopyBuffer,
+        )
+
+        build = allocator._build_cd_bound_buffers
+
+        def with_allocation_choice(*args):
+            buffers = build(*args)
+            # Inject only the allocation-dependent choice, not divisions or
+            # the proof. Preparation must use the same context as pricing.
+            if failure == "source_clone":
+                extra = CoreDivisionBuffer(
+                    "input", 128, [0, 1], core_divisions=[CoreDivision()]
+                )
+            else:
+                extra = RelayoutCopyBuffer(
+                    "shuffle",
+                    128,
+                    [0, 1],
+                    core_divisions=[CoreDivision()],
+                    relayout_parent=stage.name,
+                )
+            return [*buffers, extra]
+
+        monkeypatch.setattr(
+            allocator, "_build_cd_bound_buffers", with_allocation_choice
+        )
+    if failure == "core_budget":
+        with pytest.raises(AssertionError, match="fixed direct-read division over"):
+            allocator._prepare_buffers(graph)
+        return
+    buffers = allocator._prepare_buffers(graph)
+    actual = next(buf for buf in buffers if buf.name == consumer.name)
+    assert actual.core_divisions == [am._fixed_core_division(consumer)]
