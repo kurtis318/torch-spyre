@@ -107,8 +107,10 @@ See [Common Recipes](#common-recipes) for more configuration patterns.
 
 The **Unified Logging Framework (ULF)** consolidates all torch-spyre logging
 (Python and C++) behind a hierarchical component system configured via the
-`TORCH_LOGS` environment variable with a single, per-component configuration
-that is consistent across Python and C++ code paths.
+`TORCH_LOGS` environment variable, replacing the deprecated
+`TORCH_SPYRE_DEBUG` and `SPYRE_LOG_FILE` variables with a single,
+per-component configuration that is consistent across Python and C++ code
+paths.
 
 A **component** is a dot-separated identifier (e.g.,
 `spyre.inductor.lowering`) that names a logical subsystem within
