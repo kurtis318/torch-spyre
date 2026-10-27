@@ -55,12 +55,11 @@ def _enter_fresh_graph(test: unittest.TestCase) -> GraphLowering:
 
 def _make_buffer(name: str, host_size: tuple[int, ...] = _HOST_SIZE) -> ComputedBuffer:
     """Create a minimal ComputedBuffer with the given name."""
-    strides = [int(s) for s in FlexibleLayout.contiguous_strides(list(host_size))]
     layout = FlexibleLayout(
         torch.device("cpu"),
         torch.float16,
         [Integer(s) for s in host_size],
-        [Integer(s) for s in strides],
+        list(range(len(host_size) - 1, -1, -1)),
     )
     data = Pointwise(
         device=torch.device("cpu"),
