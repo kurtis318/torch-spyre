@@ -230,7 +230,7 @@ def _check_name_to_op_consistency(
 ) -> list[GraphValidationError]:
     violations: list[GraphValidationError] = []
     for op in graph.operations:
-        op_name = op.get_operation_name()
+        op_name = op.operation_name
         if op_name is None:
             violations.append(
                 GraphValidationError(
