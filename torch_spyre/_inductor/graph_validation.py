@@ -31,6 +31,7 @@ Invariants checked:
 - INV-6: Graph outputs reference valid buffers.
 - INV-7: ``name_to_users`` keys reference defined or removed names.
 - INV-8: No live operation reads from a removed buffer.
+- INV-10: Operation names in ``graph.operations`` are unique.
 
 Planned future work:
 
@@ -101,6 +102,7 @@ def validate_graph(
         )
     violations.extend(_check_name_to_buffer_consistency(graph, pass_name))
     violations.extend(_check_name_to_op_consistency(graph, pass_name))
+    violations.extend(_check_operation_name_uniqueness(graph, pass_name))
     violations.extend(_check_reads_from_defined_buffers(graph, pass_name))
     violations.extend(_check_graph_outputs_valid(graph, pass_name))
     violations.extend(_check_name_to_users_consistency(graph, pass_name))
@@ -260,6 +262,40 @@ def _check_name_to_op_consistency(
                 )
             )
 
+    return violations
+
+
+# ------------------------------------------------------------------
+# INV-10: Operation name uniqueness
+# ------------------------------------------------------------------
+
+
+def _check_operation_name_uniqueness(
+    graph: GraphLowering, pass_name: str
+) -> list[GraphValidationError]:
+    """Verify that no two operations in graph.operations share a name.
+
+    INV-4 checks that name_to_op entries are correct, but name_to_op is a
+    dict — when two ops share a name the second silently overwrites the
+    first, so INV-4 sees only the survivor.  This check scans
+    graph.operations directly and catches the duplicate that INV-4 misses.
+    """
+    violations: list[GraphValidationError] = []
+    seen: dict[str, int] = {}
+    for i, op in enumerate(graph.operations):
+        op_name = op.operation_name
+        if op_name is None:
+            continue
+        if op_name in seen:
+            violations.append(
+                GraphValidationError(
+                    "INV-10: operation names must be unique",
+                    f"Operation name {op_name!r} appears at indices "
+                    f"{seen[op_name]} and {i} in graph.operations",
+                    pass_name,
+                )
+            )
+        seen[op_name] = i
     return violations
 
 

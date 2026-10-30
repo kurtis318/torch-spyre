@@ -348,6 +348,59 @@ class TestNameToOpConsistency(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Tests: Operation Name Uniqueness (INV-10)
+# ---------------------------------------------------------------------------
+
+
+class TestOperationNameUniqueness(unittest.TestCase):
+    def setUp(self):
+        self.graph = _enter_fresh_graph(self)
+
+    def test_duplicate_operation_names_detected(self):
+        """Two operations with the same operation_name should be caught."""
+        buf1 = _make_buffer("placeholder")
+        _register_and_add_operation(self.graph, buf1)
+        op_name = buf1.get_operation_name()
+
+        buf2 = _make_buffer("placeholder")
+        _register_and_add_operation(self.graph, buf2)
+        buf2.operation_name = op_name
+        self.graph.name_to_op[op_name] = buf2
+
+        with self.assertRaises(GraphValidationError) as ctx:
+            validate_graph(self.graph)
+        self.assertIn("INV-10", str(ctx.exception))
+        self.assertIn("unique", str(ctx.exception).lower())
+
+    def test_unique_operation_names_pass(self):
+        """Operations with distinct names should not trigger INV-10."""
+        for _ in range(3):
+            buf = _make_buffer("placeholder")
+            _register_and_add_operation(self.graph, buf)
+        validate_graph(self.graph)
+
+    def test_duplicate_op_name_after_manual_assignment(self):
+        """A manually assigned duplicate name should be caught.
+
+        Simulates the while_loop_bridge pattern where operation_name is
+        set directly without going through register_operation.
+        """
+        buf1 = _make_buffer("placeholder")
+        _register_and_add_operation(self.graph, buf1)
+        op_name = buf1.get_operation_name()
+
+        buf2 = _make_buffer("placeholder")
+        buf2.name = "manual_buf"
+        buf2.operation_name = op_name
+        self.graph.operations.append(buf2)
+        self.graph.name_to_op[op_name] = buf2
+
+        with self.assertRaises(GraphValidationError) as ctx:
+            validate_graph(self.graph)
+        self.assertIn("INV-10", str(ctx.exception))
+
+
+# ---------------------------------------------------------------------------
 # Tests: Reads from Defined Buffers (INV-5)
 # ---------------------------------------------------------------------------
 
